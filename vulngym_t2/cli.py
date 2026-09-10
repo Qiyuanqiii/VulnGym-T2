@@ -56,6 +56,10 @@ def parser():
     p.add_argument("--max-tokens", type=_positive(32768), default=8192)
     p.add_argument("--model", type=validate_model_id, default=MODEL,
                    help="exact authorized DeepSeek model ID; no alias substitution or automatic fallback")
+    p.add_argument("--response-mode", choices=("json", "strict_tool"), default="json",
+                   help="json compatibility mode or explicit beta strict function-output mode")
+    p.add_argument("--stop-on-format-error", action="store_true",
+                   help="stop the whole batch on a malformed answer instead of continuing only unstarted inputs")
     p.add_argument("--reasoning-effort", choices=("low", "high", "max"), default="high")
     p.add_argument("--timeout", type=_positive(300), default=300)
     p.add_argument("--key-stdin", action="store_true", help="read one key line from a pipe (never a terminal); otherwise env or hidden prompt")
@@ -84,18 +88,32 @@ def prepare(jobs):
     return readers, checks
 
 
-def run_batch(jobs, readers, client, output, *, max_calls=8, max_tool_calls=24):
+def run_batch(jobs, readers, client, output, *, max_calls=8, max_tool_calls=24,
+              continue_on_format_error=True):
     """One job at a time; persist each finished job before moving to the next."""
     writer = BatchWriter(output)
     started = time.monotonic()
     processed = 0
+    case_failures = []
     status, exit_code = "completed", 0
     try:
         for index, job in enumerate(jobs):
+            case_id = job.get("report_id", f"input-{index + 1}")
+            start_case = getattr(client, "start_next_case", None)
             if client.halted:
-                status, exit_code = "provider_stopped", 2
-                break
-            client.case_id = job.get("report_id", f"input-{index + 1}")
+                if (continue_on_format_error and case_failures and callable(start_case)
+                        and getattr(client, "can_continue_after_format_error", False) is True
+                        and start_case(case_id, continue_on_format_error=True)):
+                    case_failures[-1]["continued"] = True
+                    _emit({"event": "format_failure_isolated", **case_failures[-1],
+                           "next_report_id": case_id}, sys.stderr)
+                else:
+                    status, exit_code = "provider_stopped", 2
+                    break
+            elif callable(start_case):
+                start_case(case_id)
+            else:
+                client.case_id = case_id
             _emit({"event": "report_started", "index": index + 1, "total": len(jobs),
                    "report_id": client.case_id}, sys.stderr)
             repo = readers.get(index)
@@ -107,17 +125,29 @@ def run_batch(jobs, readers, client, output, *, max_calls=8, max_tool_calls=24):
             finalized = finalize_result(job, result, repo)
             writer.record(job, finalized)
             processed += 1
+            if client.halted and getattr(client, "can_continue_after_format_error", False) is True:
+                case_failures.append({"report_id": case_id,
+                                      "code": _code(client.halted, "response_format_error"),
+                                      "continued": False})
             _emit({"event": "report_finished", "index": index + 1,
                    "complete_candidate": finalized["entry"] is not None,
                    "model_calls": result.get("model_calls", 0), "http_attempts": client.calls}, sys.stderr)
         if client.halted:
-            status, exit_code = "provider_stopped", 2
+            if (continue_on_format_error and processed == len(jobs)
+                    and getattr(client, "can_continue_after_format_error", False) is True):
+                status, exit_code = "completed_with_errors", 2
+            else:
+                status, exit_code = "provider_stopped", 2
+        elif case_failures:
+            status, exit_code = "completed_with_errors", 2
     except KeyboardInterrupt:
         status, exit_code = "interrupted", 130
     except Exception as exc:
         status, exit_code = _code(exc, "batch_processing_failed"), 2
     summary = writer.finish({"status": status, "requested_input_count": len(jobs),
                              "unprocessed_input_count": len(jobs) - processed,
+                             "format_failure_count": len(case_failures), "case_failures": case_failures,
+                             "continue_on_format_error": continue_on_format_error,
                              "elapsed_seconds": round(time.monotonic() - started, 3),
                              "provider": client.summary()})
     return summary, exit_code
@@ -158,10 +188,12 @@ def main(argv=None):
         client = DeepSeekClient(secret, ledger, run_id=datetime.now(timezone.utc).strftime("t2-%Y%m%dT%H%M%S-%f"),
                                 max_requests=args.max_requests, max_tokens=args.max_tokens,
                                 reasoning_effort=args.reasoning_effort, timeout=args.timeout, model=args.model,
+                                response_mode=args.response_mode,
                                 progress=lambda event: _emit(event, sys.stderr))
         secret = ""
         summary, code = run_batch(jobs, readers, client, args.output, max_calls=args.max_calls_per_report,
-                                  max_tool_calls=args.max_tool_calls)
+                                 max_tool_calls=args.max_tool_calls,
+                                 continue_on_format_error=not args.stop_on_format_error)
         _emit(summary)
         return code
     except KeyboardInterrupt:

@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from vulngym_t2 import transport
+from tests.test_t2_v2_protocol import record, step, tool_envelope
 
 
 def envelope(content='{"action":"draft"}', *, finish="stop", model=None):
@@ -42,6 +43,76 @@ class FakeResponse:
 
 
 class TransportTests(unittest.TestCase):
+    def test_strict_function_answer_normalizes_typed_fields_without_hidden_reasoning(self):
+        value = step([record(), record("vuln_title", "unconfirmed", status="uncertain")])
+        envelope_value = json.loads(tool_envelope(value))
+        envelope_value["choices"][0]["message"]["content"] = "ancillary prose must not become an answer"
+        result = transport.parse_chat_response(json.dumps(envelope_value).encode(), response_mode="strict_tool")
+        self.assertEqual(result["fields"], {"commit": "a" * 40})
+        self.assertEqual(result["field_reviews"]["commit"]["revision_basis"], "behavior_at_revision")
+        self.assertEqual(result["field_reviews"]["vuln_title"]["suggested_value"], "unconfirmed")
+        self.assertNotIn("private hidden reasoning", json.dumps(result))
+        self.assertNotIn("ancillary prose", json.dumps(result))
+        self.assertNotIn("tool_calls", result)
+
+    def test_strict_mode_rejects_text_fallback_multiple_wrong_or_malformed_functions(self):
+        with self.assertRaises(transport.TransportError):
+            transport.parse_chat_response(envelope(), response_mode="strict_tool")
+        mutations = [
+            lambda message: message["tool_calls"].append(message["tool_calls"][0]),
+            lambda message: message["tool_calls"][0]["function"].update(name="execute_shell"),
+            lambda message: message["tool_calls"][0]["function"].update(arguments={}),
+            lambda message: message["tool_calls"][0]["function"].update(extra="not allowed"),
+            lambda message: message["tool_calls"][0].update(type="shell"),
+            lambda message: message["tool_calls"][0].pop("id"),
+            lambda message: message.update(content={"malformed": "content"}),
+            lambda message: message.update(role="user"),
+            lambda message: message.update(refusal="cannot comply"),
+        ]
+        for mutate in mutations:
+            body = json.loads(tool_envelope())
+            mutate(body["choices"][0]["message"])
+            with self.subTest(mutation=mutations.index(mutate)), self.assertRaises(transport.TransportError) as caught:
+                transport.parse_chat_response(json.dumps(body).encode(), response_mode="strict_tool")
+            self.assertNotIsInstance(caught.exception, transport._CompletionJSONBlocked)
+
+    def test_strict_arguments_do_not_unwrap_repair_or_skip_schema_validation(self):
+        for arguments in ('{"bad":', '{} {}', '[]', '```json\n{}\n```', '{"a":1,"a":2}'):
+            with self.subTest(arguments=arguments), self.assertRaises(transport._CompletionJSONBlocked) as caught:
+                transport.parse_chat_response(tool_envelope(arguments=arguments), response_mode="strict_tool")
+            self.assertEqual(caught.exception.diagnostic["phase"], "parse_completion_json")
+            self.assertFalse(caught.exception.diagnostic["outer_code_fence_unwrapped"])
+        with self.assertRaisesRegex(transport.TransportError, "deepseek_strict_protocol_invalid") as caught:
+            transport.parse_chat_response(tool_envelope(arguments='{"action":"draft"}'), response_mode="strict_tool")
+        self.assertNotIsInstance(caught.exception, transport._CompletionJSONBlocked)
+
+    def test_format_isolation_marker_requires_completed_valid_envelope(self):
+        for mutation in (lambda body: body.update(model="other"),
+                         lambda body: body.update(object="wrong"),
+                         lambda body: body["choices"][0].update(finish_reason="length"),
+                         lambda body: body["choices"][0]["message"].update(refusal="refused")):
+            body = json.loads(envelope('{"bad":'))
+            mutation(body)
+            with self.assertRaises(transport.TransportError) as caught:
+                transport.parse_chat_response(json.dumps(body).encode())
+            self.assertNotIsInstance(caught.exception, transport._CompletionJSONBlocked)
+        with self.assertRaises(transport.TransportError) as caught:
+            transport.parse_chat_response(b'{"bad":')
+        self.assertNotIsInstance(caught.exception, transport._CompletionJSONBlocked)
+
+    def test_strict_beta_endpoint_is_one_post_same_host_and_rejects_other_paths(self):
+        connection = MagicMock()
+        connection.getresponse.return_value = FakeResponse(b"{}")
+        with patch.object(transport.http.client, "HTTPSConnection", return_value=connection) as factory, patch.object(transport, "Timer"):
+            self.assertEqual(transport._post_official_strict(b"{}", "unit-test-key", 5), b"{}")
+        factory.assert_called_once_with("api.deepseek.com", timeout=5)
+        self.assertEqual(connection.request.call_args.args, ("POST", "/beta/chat/completions"))
+        self.assertEqual(connection.request.call_count, 1)
+        with patch.object(transport.http.client, "HTTPSConnection") as factory:
+            with self.assertRaisesRegex(transport.TransportError, "deepseek_api_path_invalid"):
+                transport._post_official(b"{}", "unit-test-key", 5, api_path="https://elsewhere.invalid")
+        factory.assert_not_called()
+
     def test_standalone_imports_and_structured_answer_only(self):
         source = Path(transport.__file__).read_text(encoding="utf-8")
         imports = [node.module for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ImportFrom)]

@@ -199,6 +199,78 @@ class ReviewExportTests(unittest.TestCase):
         self.assertIn("没有已处理的复核记录", packet)
         self.assertNotIn("## 逐条复核 ", packet)
 
+    def test_revision_basis_labels_are_machine_claims_without_rewriting_records(self):
+        labels = {"behavior_at_revision": "源码机制依据", "affected_range_and_source": "影响范围+源码",
+                  "inspected_only": "仅检查过", "unknown": "未建立"}
+        for basis, label in labels.items():
+            with self.subTest(basis=basis):
+                self.reviews[1]["field_reviews"]["commit"] = {
+                    "status": "supported", "reason": "Saved machine claim", "evidence_refs": ["E3"],
+                    "revision_basis": basis,
+                }
+                before = deepcopy((self.summary, self.entries, self.reviews))
+                packet = render_packet(self.summary, self.entries, self.reviews)
+                self.assertIn("版本判断依据（已记录机器声明）：" + label, packet)
+                self.assertIn("机器声明不等于人工审核", packet)
+                self.assertEqual((self.summary, self.entries, self.reviews), before)
+                self.assertEqual(self.entries[0]["verify"], 0)
+                self.assertEqual(self.reviews[1]["status"], "complete")
+
+    def test_legacy_revision_basis_is_undeclared_not_reclassified(self):
+        self.reviews[1]["field_reviews"]["commit"] = {
+            "status": "supported", "reason": "Legacy assessment", "evidence_refs": ["E3"],
+        }
+        before = deepcopy((self.summary, self.entries, self.reviews))
+        packet = render_packet(self.summary, self.entries, self.reviews)
+        section = packet.split("## 逐条复核 ")[2]
+        self.assertIn("版本判断依据（已记录机器声明）：旧记录未声明", section)
+        self.assertIn("| commit | supported | Legacy assessment |", section)
+        self.assertEqual((self.summary, self.entries, self.reviews), before)
+        self.assertNotIn("revision_basis", self.reviews[1]["field_reviews"]["commit"])
+
+    def test_self_review_status_is_shown_without_inference_or_reclassification(self):
+        labels = {"not_requested": "未请求（不是失败）", "completed": "已完成机器自查",
+                  "failed": "机器自查失败", None: "旧记录未声明"}
+        for status, label in labels.items():
+            with self.subTest(status=status):
+                if status is None:
+                    self.reviews[0].pop("self_review_status", None)
+                else:
+                    self.reviews[0]["self_review_status"] = status
+                before = deepcopy((self.summary, self.entries, self.reviews))
+                packet = render_packet(self.summary, self.entries, self.reviews)
+                section = packet.split("## 逐条复核 ")[1]
+                self.assertIn("机器自查状态：" + label, section)
+                self.assertIn("机器自查不等于独立人工审核", section)
+                self.assertEqual((self.summary, self.entries, self.reviews), before)
+                self.assertEqual(self.reviews[0]["status"], "draft")
+
+    def test_completed_with_errors_is_finished_but_not_all_successful(self):
+        self.summary.update(status="completed_with_errors", requested_input_count=3,
+                            unprocessed_input_count=0, format_failure_count=1, provider={},
+                            case_failures=[{"report_id": self.reviews[0]["report_id"],
+                                            "code": "model_format_failure", "continued": True}])
+        self.save()
+        before = {path.name: path.read_bytes() for path in self.run.iterdir()}
+        with patch("socket.socket", side_effect=AssertionError("network forbidden")):
+            export_review(self.run, self.root / "with-errors.md")
+        packet = (self.root / "with-errors.md").read_text(encoding="utf-8")
+        self.assertIn("批次已处理完但含格式错误", packet)
+        self.assertIn("不是全成功", packet)
+        self.assertIn("format&#95;failure&#95;count", packet)
+        self.assertIn("model&#95;format&#95;failure", packet)
+        self.assertIn("失败输入仍是草稿", packet)
+        self.assertEqual(self.reviews[0]["status"], "draft")
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.run.iterdir()})
+        for changes in ({"unprocessed_input_count": 1, "requested_input_count": 4},
+                        {"format_failure_count": 0}, {"format_failure_count": True},
+                        {"requested_input_count": 4}):
+            with self.subTest(changes=changes):
+                summary = deepcopy(self.summary)
+                summary.update(changes)
+                with self.assertRaises(ExportError):
+                    render_packet(summary, self.entries, self.reviews)
+
     def test_cli_emits_compact_json_on_success_and_failure(self):
         output = self.root / "packet.md"
         process = subprocess.run([sys.executable, "-B", "-m", "vulngym_t2.review_export", "--run-dir", str(self.run),

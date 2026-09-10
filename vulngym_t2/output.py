@@ -18,6 +18,7 @@ from ._vendor.schema_adapter import ENTRY_FIELDS, ORIGIN, SchemaAdapter
 
 _ADAPTER = SchemaAdapter()
 _STATUSES = frozenset({"supported", "uncertain", "missing", "conflicting"})
+_REVISION_BASES = frozenset({"behavior_at_revision", "affected_range_and_source", "inspected_only", "unknown"})
 _SECRET_KEYS = re.compile(r"(?i)^(?:api[_-]?key|authorization|password|access[_-]?token|secret|credential)s?$")
 _PRIVATE_KEYS = frozenset({"reasoning", "reasoning_content", "chain_of_thought", "raw_response", "messages", "repo_path"})
 _KEY_VALUE = re.compile(r'''(?i)\b(api[_-]?key|access[_-]?token|authorization|password)\s*[:=]\s*(?:"[^"\r\n]{8,}"|'[^'\r\n]{8,}'|[A-Za-z0-9_-]{24,})''')
@@ -84,6 +85,33 @@ def _successful(evidence: Mapping[str, Any]) -> bool:
     result = evidence.get("result")
     return (evidence.get("success") is not False and not evidence.get("error")
             and not (isinstance(result, Mapping) and (result.get("error") or result.get("ok") is False or result.get("success") is False)))
+
+
+def _revision_basis(value: Any) -> str:
+    return value if isinstance(value, str) and value in _REVISION_BASES else "unknown"
+
+
+def _commit_support_problem(commit, basis, reason, refs, evidence):
+    """Check a declared basis and source receipts, never the prose's semantics."""
+    if basis not in {"behavior_at_revision", "affected_range_and_source"}:
+        return ("revision_basis_not_established",
+                "Commit requires a declared behavior_at_revision or affected_range_and_source basis; inspecting a revision alone is insufficient.")
+    if not isinstance(reason, str) or not reason.strip():
+        return ("revision_reason_required", "Briefly explain why the cited mechanism applies at this revision; this remains a model assessment.")
+    if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit):
+        for ref in refs:
+            record = evidence.get(ref, {})
+            result = record.get("result")
+            if (record.get("tool") != "read_file" or record.get("success") is not True or not _successful(record)
+                    or not isinstance(result, Mapping) or result.get("commit") != commit
+                    or not isinstance(result.get("path"), str) or not _relative_source_path(result["path"])):
+                continue
+            text, lines = result.get("text"), result.get("lines")
+            if ((isinstance(text, str) and bool(text.strip())) or
+                    (isinstance(lines, list) and any(isinstance(row, Mapping) and
+                     isinstance(row.get("code"), str) and row["code"].strip() for row in lines))):
+                return None
+    return ("revision_source_not_read", "Commit requires cited successful read_file source content at the selected full SHA, not only history, metadata, or a diff.")
 
 
 def _span(location: Mapping[str, Any]) -> tuple[int, int]:
@@ -229,6 +257,8 @@ def finalize_result(job: Mapping[str, Any], result: Mapping[str, Any] | None, re
         reason = model_review.get("reason")
         reason = reason.strip()[:1600] if isinstance(reason, str) else ""
         reviews[field] = {"status": status, "reason": reason or "No supported, cited field assessment was supplied.", "evidence_refs": refs}
+        if field == "commit":
+            reviews[field]["revision_basis"] = _revision_basis(model_review.get("revision_basis"))
         suggestion = model_review.get("suggested_value", value)
         if suggestion is not None:
             suggestions[field] = suggestion
@@ -241,6 +271,11 @@ def finalize_result(job: Mapping[str, Any], result: Mapping[str, Any] | None, re
         if status != "supported":
             errors.append({"field": field, "code": "model_" + status, "message": "Model assessment does not establish this field."})
             continue
+        if field == "commit":
+            problem = _commit_support_problem(value, reviews[field]["revision_basis"], reason, refs, evidence)
+            if problem is not None:
+                reject(field, *problem)
+                continue
         if not reason or not refs or any(ref not in evidence or not _successful(evidence[ref]) for ref in refs):
             reject(field, "unsupported_evidence", "Supported fields require a concise reason and existing successful evidence references.")
             continue
@@ -308,8 +343,14 @@ def finalize_result(job: Mapping[str, Any], result: Mapping[str, Any] | None, re
     input_error = job.get("input_error")
     if input_error:
         errors.append({"field": None, "code": "input_failure", "message": input_error})
+    self_review_status = result.get("self_review_status", "not_requested")
+    if self_review_status not in ("not_requested", "completed", "failed"):
+        self_review_status = "failed"
+    if self_review_status == "failed":
+        errors.append({"field": None, "code": "self_review_incomplete",
+                       "message": "The requested self-review did not return a valid draft; initial fields and evidence are retained for review, not exported as a complete entry."})
     entry = None
-    if not input_error and all(draft[field] is not None for field in ENTRY_FIELDS):
+    if not input_error and self_review_status != "failed" and all(draft[field] is not None for field in ENTRY_FIELDS):
         entry = _ADAPTER.adapt(draft, formal_t2=True)
     pipeline_errors = result.get("errors", [])
     pipeline_errors = pipeline_errors if isinstance(pipeline_errors, list) else [pipeline_errors]
@@ -321,6 +362,7 @@ def finalize_result(job: Mapping[str, Any], result: Mapping[str, Any] | None, re
         "entry_id": trusted.get("entry_id"), "report_id": trusted.get("report_id"),
         "source_link": trusted.get("source_link"),
         "status": "input_failure" if input_error else "complete" if entry is not None else "draft",
+        "self_review_status": self_review_status,
         "draft_fields": draft, "field_reviews": reviews, "suggested_values": suggestions,
         "errors": errors, "pipeline_errors": pipeline_errors, "model_errors": model_errors, "tool_errors": tool_errors,
         "model_calls": result.get("model_calls", 0), "tool_calls": result.get("tool_calls", 0),

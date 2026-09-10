@@ -58,6 +58,8 @@ def fixture(entry_id="entry-00001"):
     reviews = {field: {"status": "supported", "reason": "Supported by supplied advisory and source context.",
                        "evidence_refs": ["E0003" if field in {"entry_point", "critical_operation", "commit"} else "E0002"]}
                for field in fields}
+    reviews["commit"].update(revision_basis="behavior_at_revision",
+                             reason="At the selected revision, request.body reaches execute without a restriction, matching the reported mechanism.")
     result = {"fields": fields, "field_reviews": reviews, "evidence": evidence,
               "actions": [{"action": "tools", "tool": "read_file", "evidence_id": "E0003"}],
               "model_calls": 3, "tool_calls": 1, "errors": []}
@@ -65,6 +67,80 @@ def fixture(entry_id="entry-00001"):
 
 
 class T2V2OutputTests(unittest.TestCase):
+    def test_failed_requested_self_review_preserves_draft_but_blocks_complete_export(self):
+        job, result = fixture()
+        baseline = finalize_result(job, result, StubRepoReader())
+        for state in ("not_requested", "completed", "failed"):
+            with self.subTest(state=state):
+                result["self_review_status"] = state
+                # Early recovered protocol errors alone must not demote a result.
+                result["errors"] = ["Expected action=tools or action=draft"]
+                finalized = finalize_result(job, result, StubRepoReader())
+                review = finalized["review"]
+                self.assertEqual(review["self_review_status"], state)
+                self.assertEqual(review["draft_fields"], baseline["review"]["draft_fields"])
+                self.assertEqual(review["suggested_values"], baseline["review"]["suggested_values"])
+                self.assertEqual(review["evidence"], baseline["review"]["evidence"])
+                self.assertEqual(review["field_reviews"], baseline["review"]["field_reviews"])
+                self.assertEqual(finalized["entry"] is None, state == "failed")
+                self.assertEqual(review["status"], "draft" if state == "failed" else "complete")
+                self.assertEqual(any(error["field"] is None and error["code"] == "self_review_incomplete"
+                                    for error in review["errors"]), state == "failed")
+
+    def test_commit_basis_requires_actual_revision_source_without_requiring_a_fix(self):
+        for basis in ("behavior_at_revision", "affected_range_and_source"):
+            with self.subTest(basis=basis):
+                job, result = fixture()
+                result["field_reviews"]["commit"]["revision_basis"] = basis
+                result["field_reviews"]["commit"]["reason"] = "所选版本中，请求体未经约束传入执行操作；该行为与材料所述机制相符。"
+                finalized = finalize_result(job, result, StubRepoReader())
+                self.assertIsNotNone(finalized["entry"])
+                self.assertEqual(finalized["review"]["field_reviews"]["commit"]["revision_basis"], basis)
+                self.assertEqual(finalized["entry"]["verify"], 0)
+
+    def test_unestablished_commit_basis_preserves_candidate_and_other_fields(self):
+        for basis in (None, "inspected_only", "unknown", "invented", []):
+            with self.subTest(basis=basis):
+                job, result = fixture()
+                if basis is None:
+                    result["field_reviews"]["commit"].pop("revision_basis")
+                else:
+                    result["field_reviews"]["commit"]["revision_basis"] = basis
+                finalized = finalize_result(job, result, StubRepoReader())
+                review = finalized["review"]
+                self.assertIsNone(finalized["entry"])
+                self.assertIsNone(review["draft_fields"]["commit"])
+                self.assertEqual(review["suggested_values"]["commit"], COMMIT)
+                self.assertEqual(review["field_reviews"]["commit"]["status"], "uncertain")
+                self.assertIn("revision_basis_not_established", review["field_reviews"]["commit"]["validation_errors"])
+                self.assertEqual(review["draft_fields"]["project"], "sample")
+                self.assertEqual(review["draft_fields"]["vuln_title"], result["fields"]["vuln_title"])
+
+    def test_commit_basis_cannot_replace_matching_source_or_a_nonempty_reason(self):
+        for mode in ("history", "advisory", "wrong_commit", "no_source_bytes", "empty_source", "failed_read", "empty_reason", "nonstring_reason"):
+            with self.subTest(mode=mode):
+                job, result = fixture()
+                record = result["evidence"][2]
+                if mode == "history":
+                    record["tool"] = "inspect_commit"
+                elif mode == "advisory":
+                    result["field_reviews"]["commit"]["evidence_refs"] = ["E0002"]
+                elif mode == "wrong_commit":
+                    record["result"]["commit"] = "b" * 40
+                elif mode == "no_source_bytes":
+                    record["result"].pop("text")
+                    record["result"].pop("lines")
+                elif mode == "empty_source":
+                    record["result"].update(text=" ", lines=[{}])
+                elif mode == "failed_read":
+                    record["success"] = False
+                else:
+                    result["field_reviews"]["commit"]["reason"] = " " if mode == "empty_reason" else {"claim": "not prose"}
+                finalized = finalize_result(job, result, StubRepoReader())
+                self.assertIsNone(finalized["entry"])
+                self.assertIsNone(finalized["review"]["draft_fields"]["commit"])
+                self.assertEqual(finalized["review"]["suggested_values"]["commit"], COMMIT)
+
     def test_complete_entry_has_only_official_fields_and_controller_provenance(self):
         job, result = fixture()
         repo = StubRepoReader()
@@ -99,7 +175,10 @@ class T2V2OutputTests(unittest.TestCase):
                 review = finalized["review"]
                 self.assertIsNone(review["draft_fields"]["entry_point"])
                 self.assertEqual(review["draft_fields"]["vuln_title"], result["fields"]["vuln_title"])
-                self.assertIn("source_not_read", review["field_reviews"]["entry_point"]["validation_errors"])
+                expected = "source_not_read" if mode == "advisory_only" else "commit_not_established"
+                self.assertIn(expected, review["field_reviews"]["entry_point"]["validation_errors"])
+                if mode != "advisory_only":
+                    self.assertIn("revision_source_not_read", review["field_reviews"]["commit"]["validation_errors"])
 
     def test_exact_repository_check_is_required_even_after_a_real_read(self):
         job, result = fixture()

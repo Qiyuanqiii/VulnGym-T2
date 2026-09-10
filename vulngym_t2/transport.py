@@ -19,10 +19,13 @@ from threading import Event, Timer
 import time
 from typing import Any
 
+from . import protocol
+
 
 MODEL_ID = "deepseek-v4-pro"
 API_HOST = "api.deepseek.com"
 API_PATH = "/chat/completions"
+STRICT_API_PATH = "/beta/chat/completions"
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_JSON_DEPTH = 16
@@ -78,6 +81,10 @@ class _JSONBlocked(TransportError):
         self.diagnostic = diagnostic
 
 
+class _CompletionJSONBlocked(_JSONBlocked):
+    """Format failure only after validating the completed provider envelope."""
+
+
 def _json_shape(text: str | None) -> dict[str, Any]:
     stripped = text.lstrip() if isinstance(text, str) else ""
     first = stripped[:1]
@@ -128,7 +135,7 @@ def _http_error(status: int) -> str:
                 else "deepseek_server_error" if status >= 500 else "deepseek_http_error")
 
 
-def _post_official(body: bytes, api_key: str, timeout: float) -> bytes:
+def _post_official(body: bytes, api_key: str, timeout: float, *, api_path: str = API_PATH) -> bytes:
     """One direct HTTPS POST, bounded response and total socket deadline.
 
     A timer shuts down the active socket during header/body waits, including
@@ -137,6 +144,8 @@ def _post_official(body: bytes, api_key: str, timeout: float) -> bytes:
     """
     if not isinstance(body, bytes) or len(body) > MAX_REQUEST_BYTES:
         raise TransportError("deepseek_request_too_large")
+    if api_path not in (API_PATH, STRICT_API_PATH):
+        raise TransportError("deepseek_api_path_invalid")
     if (not isinstance(api_key, str) or not 1 <= len(api_key) <= 4096
             or not all(33 <= ord(char) <= 126 for char in api_key)):
         raise TransportError("deepseek_api_key_missing_or_invalid")
@@ -188,7 +197,7 @@ def _post_official(body: bytes, api_key: str, timeout: float) -> bytes:
         active_socket.settimeout(remaining())
         phase = "send"
         request_started = True
-        connection.request("POST", API_PATH, body=body, headers={
+        connection.request("POST", api_path, body=body, headers={
             "Authorization": "Bearer " + api_key, "Content-Type": "application/json",
             "Accept": "application/json", "Accept-Encoding": "identity",
         })
@@ -235,6 +244,10 @@ def _post_official(body: bytes, api_key: str, timeout: float) -> bytes:
         if response is not None:
             response.close()
         connection.close()
+
+
+def _post_official_strict(body: bytes, api_key: str, timeout: float) -> bytes:
+    return _post_official(body, api_key, timeout, api_path=STRICT_API_PATH)
 
 
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -336,8 +349,11 @@ def _truncation_metadata(envelope: dict[str, Any], choice: dict[str, Any], size:
             "currency_cost_measured": False}
 
 
-def parse_chat_response(raw: bytes, *, expected_model: str = MODEL_ID) -> dict[str, Any]:
+def parse_chat_response(raw: bytes, *, expected_model: str = MODEL_ID,
+                        response_mode: str = "json") -> dict[str, Any]:
     expected_model = validate_model_id(expected_model)
+    if not isinstance(response_mode, str) or response_mode not in {"json", "strict_tool"}:
+        raise ValueError("provider_response_mode_invalid")
     envelope = _strict_object(raw)
     if envelope.get("object") != "chat.completion":
         raise TransportError("deepseek_response_invalid")
@@ -350,21 +366,52 @@ def parse_chat_response(raw: bytes, *, expected_model: str = MODEL_ID) -> dict[s
     if type(choice.get("index")) is not int or choice["index"] != 0:
         raise TransportError("deepseek_response_invalid")
     finish = choice.get("finish_reason")
-    if finish != "stop":
+    expected_finish = "tool_calls" if response_mode == "strict_tool" else "stop"
+    if finish != expected_finish:
         if finish == "length":
             raise _CompletionBlocked(_truncation_metadata(envelope, choice, len(raw)))
         raise TransportError({"content_filter": "deepseek_content_filtered",
                               "insufficient_system_resource": "deepseek_resource_unavailable"}.get(
                                   finish if isinstance(finish, str) else "", "deepseek_completion_incomplete"))
     message = choice.get("message")
-    if not isinstance(message, dict) or message.get("role") != "assistant" or message.get("tool_calls"):
+    if not isinstance(message, dict) or message.get("role") != "assistant":
         raise TransportError("deepseek_response_invalid")
     if message.get("refusal"):
         raise TransportError("deepseek_refusal")
+    if response_mode == "strict_tool":
+        calls = message.get("tool_calls")
+        if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], dict):
+            raise TransportError("deepseek_strict_tool_call_invalid")
+        call = calls[0]
+        function = call.get("function")
+        if (call.get("type") != "function" or not isinstance(function, dict)
+                or function.get("name") != protocol.STRICT_TOOL_NAME
+                or set(function) != {"name", "arguments"}
+                or not isinstance(call.get("id"), str) or not 1 <= len(call["id"]) <= 256):
+            raise TransportError("deepseek_strict_tool_call_invalid")
+        content = message.get("content")
+        if content is not None and not isinstance(content, str):
+            raise TransportError("deepseek_strict_tool_call_invalid")
+        # Native tool messages may also contain prose. Only the sole typed
+        # container is authoritative; ancillary content is never returned.
+        arguments = function.get("arguments")
+        if not isinstance(arguments, str) or not arguments.strip():
+            raise TransportError("deepseek_strict_tool_arguments_invalid")
+        value = _parse_completion_json(arguments, unwrap_fence=False)
+        try:
+            return protocol.normalize_step(value)
+        except protocol.ProtocolError:
+            raise TransportError("deepseek_strict_protocol_invalid") from None
+    if message.get("tool_calls"):
+        raise TransportError("deepseek_response_invalid")
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
         raise TransportError("deepseek_empty_content")
-    json_content, unwrapped = _unwrap_json_fence(content)
+    return _parse_completion_json(content, unwrap_fence=True)
+
+
+def _parse_completion_json(content: str, *, unwrap_fence: bool) -> dict[str, Any]:
+    json_content, unwrapped = _unwrap_json_fence(content) if unwrap_fence else (content, False)
     try:
         result = _strict_object(json_content.encode("utf-8"))
         _validate_bounded_json(result)
@@ -373,13 +420,13 @@ def parse_chat_response(raw: bytes, *, expected_model: str = MODEL_ID) -> dict[s
                           answer_characters=len(content), outer_code_fence_unwrapped=unwrapped,
                           answer_first_nonspace_category=_json_shape(content)["first_nonspace_category"],
                           answer_contains_code_fence=_json_shape(content)["contains_code_fence"])
-        raise _JSONBlocked(error.error_code, diagnostic) from None
+        raise _CompletionJSONBlocked(error.error_code, diagnostic) from None
     except (ValueError, UnicodeError, RecursionError) as error:
         failure = _json_failure("deepseek_response_invalid_json", json_content, error)
         failure.diagnostic.update(phase="parse_completion_json", answer_characters=len(content),
                                   outer_code_fence_unwrapped=unwrapped,
                                   answer_first_nonspace_category=_json_shape(content)["first_nonspace_category"],
                                   answer_contains_code_fence=_json_shape(content)["contains_code_fence"])
-        raise failure from None
+        raise _CompletionJSONBlocked(failure.error_code, failure.diagnostic) from None
     # Only the structured answer is returned, never provider hidden reasoning.
     return result

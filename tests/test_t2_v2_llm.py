@@ -3,8 +3,11 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from vulngym_t2.llm import DeepSeekClient, MODEL, ProviderError, RequestLedger
+from vulngym_t2 import transport
+from tests.test_t2_v2_protocol import record, step, tool_envelope
 
 
 def reply(value=None, finish="stop", *, model=MODEL):
@@ -12,6 +15,12 @@ def reply(value=None, finish="stop", *, model=MODEL):
                        "choices": [{"index": 0, "finish_reason": finish,
                                     "message": {"role": "assistant", "content": json.dumps(value or {"action": "draft"})}}],
                        "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}}).encode()
+
+
+def malformed_reply(content='{"unfinished":'):
+    value = json.loads(reply())
+    value["choices"][0]["message"]["content"] = content
+    return json.dumps(value).encode()
 
 
 class ClientTests(unittest.TestCase):
@@ -26,6 +35,128 @@ class ClientTests(unittest.TestCase):
 
     def client(self, send):
         return DeepSeekClient("dummy-not-a-real-key", self.ledger, run_id="synthetic", send=send)
+
+    def test_strict_mode_uses_beta_auto_choice_and_preserves_thinking_without_fallback(self):
+        messages = [{"role": "user", "content": "test"}]
+        with patch.object(transport, "_post_official", return_value=tool_envelope(step([record()]))) as send:
+            client = DeepSeekClient("dummy-not-a-real-key", self.ledger, run_id="synthetic", response_mode="strict_tool")
+            result = client.complete(messages)
+        payload = json.loads(send.call_args.args[0])
+        self.assertEqual(send.call_args.kwargs, {"api_path": "/beta/chat/completions"})
+        self.assertEqual(payload["thinking"], {"type": "enabled"})
+        self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertEqual(payload["tool_choice"], "auto")
+        self.assertEqual(len(payload["tools"]), 1)
+        self.assertEqual(payload["tools"][0]["function"]["name"], "submit_step")
+        self.assertIs(payload["tools"][0]["function"]["strict"], True)
+        self.assertNotIn("response_format", payload)
+        self.assertNotIn("parallel_tool_calls", payload)
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(result["fields"]["commit"], "a" * 40)
+        self.assertEqual(client.summary()["response_mode"], "strict_tool")
+        self.assertNotIn("private hidden reasoning", self.path.read_text())
+        send.assert_called_once()
+
+    def test_strict_text_fallback_is_not_accepted_or_retried(self):
+        sent = []
+        client = DeepSeekClient("dummy-not-a-real-key", self.ledger, run_id="synthetic", response_mode="strict_tool",
+                                send=lambda *_: sent.append(True) or reply())
+        for _ in range(2):
+            with self.assertRaises(ProviderError):
+                client.complete([{"role": "user", "content": "test"}])
+        self.assertEqual(len(sent), 1)
+        self.assertFalse(client.can_continue_after_format_error)
+
+    def test_format_failure_is_only_resumed_explicitly_on_a_new_case_without_budget_reset(self):
+        replies = iter([malformed_reply(), reply()])
+        client = self.client(lambda *_: next(replies))
+        self.assertFalse(client.start_next_case("case-a"))
+        with self.assertRaises(ProviderError):
+            client.complete([{"role": "user", "content": "test"}])
+        self.assertTrue(client.can_continue_after_format_error)
+        with self.assertRaises(AttributeError):
+            client.can_continue_after_format_error = False
+        with self.assertRaises(ProviderError):
+            client.start_next_case("case-b")
+        with self.assertRaisesRegex(ProviderError, "format_failure_case_cannot_be_retried"):
+            client.start_next_case("case-a", continue_on_format_error=True)
+        self.assertTrue(client.start_next_case("case-b", continue_on_format_error=True))
+        self.assertEqual((client.calls, self.ledger.started), (1, 1))
+        self.assertFalse(client.can_continue_after_format_error)
+        self.assertEqual(client.complete([{"role": "user", "content": "next"}]), {"action": "draft"})
+        self.assertEqual((client.calls, self.ledger.started), (2, 2))
+        self.assertEqual(client.summary()["usage"]["total_tokens"], 60)
+        self.assertEqual(len(client.events), 2)
+        self.assertEqual(len(client.summary()["format_failure_continuations"]), 1)
+        with self.assertRaisesRegex(ProviderError, "format_failure_case_cannot_be_retried"):
+            client.start_next_case("case-a")
+        client.start_next_case("case-c")
+        with self.assertRaisesRegex(ProviderError, "authorization_request_limit_reached"):
+            client.complete([{"role": "user", "content": "beyond budget"}])
+        self.assertEqual(self.ledger.started, 2)
+
+    def test_isolation_cannot_return_to_an_already_processed_different_case(self):
+        replies = iter([reply(), malformed_reply()])
+        client = self.client(lambda *_: next(replies))
+        client.start_next_case("case-a")
+        client.complete([{"role": "user", "content": "first"}])
+        client.start_next_case("case-b")
+        with self.assertRaises(ProviderError):
+            client.complete([{"role": "user", "content": "bad"}])
+        with self.assertRaisesRegex(ProviderError, "format_failure_case_cannot_be_retried"):
+            client.start_next_case("case-a", continue_on_format_error=True)
+        self.assertEqual(client.calls, 2)
+
+    def test_resume_does_not_reset_run_limit_or_legacy_ledger_header(self):
+        original_header = self.path.read_text().splitlines()[0]
+        client = DeepSeekClient("dummy-not-a-real-key", self.ledger, run_id="synthetic", max_requests=1,
+                                send=lambda *_: malformed_reply())
+        client.start_next_case("case-a")
+        with self.assertRaises(ProviderError):
+            client.complete([{"role": "user", "content": "bad"}])
+        client.start_next_case("case-b", continue_on_format_error=True)
+        with self.assertRaisesRegex(ProviderError, "run_request_limit_reached"):
+            client.complete([{"role": "user", "content": "over limit"}])
+        self.assertEqual((client.calls, self.ledger.started), (1, 1))
+        self.assertEqual(self.path.read_text().splitlines()[0], original_header)
+
+    def test_unsafe_failures_never_allow_case_continuation(self):
+        refused = json.loads(reply())
+        refused["choices"][0]["message"].update(refusal="refused", content='{"bad":')
+        failures = [b'{"outer":', reply(model="another-model"), reply(finish="length"),
+                    json.dumps(refused).encode(), transport.TransportError("deepseek_authentication_failed"),
+                    transport.TransportError("deepseek_access_denied"), transport.TransportError("deepseek_timeout"),
+                    RuntimeError("private exception"), transport._CompletionJSONBlocked("deepseek_response_invalid_json", {"phase": "parse_completion_json"})]
+        for index, failure in enumerate(failures):
+            def send(*_):
+                if isinstance(failure, Exception):
+                    raise failure
+                return failure
+            ledger = RequestLedger(self.path.with_name(f"unsafe-{index}.jsonl"), limit=2)
+            try:
+                client = DeepSeekClient("dummy-not-a-real-key", ledger, run_id="synthetic", send=send)
+                client.start_next_case("case-a")
+                with self.subTest(index=index), self.assertRaises(ProviderError):
+                    client.complete([{"role": "user", "content": "test"}])
+                self.assertFalse(client.can_continue_after_format_error)
+                with self.assertRaises(ProviderError):
+                    client.start_next_case("case-b", continue_on_format_error=True)
+                self.assertEqual(client.calls, 1)
+            finally:
+                ledger.close()
+
+    def test_strict_argument_json_failure_can_be_isolated_but_schema_failure_cannot(self):
+        for index, arguments in enumerate(('{"bad":', '{"action":"draft"}')):
+            ledger = RequestLedger(self.path.with_name(f"strict-{index}.jsonl"), limit=2)
+            try:
+                client = DeepSeekClient("dummy-not-a-real-key", ledger, run_id="synthetic", response_mode="strict_tool",
+                                        send=lambda *_: tool_envelope(arguments=arguments))
+                client.start_next_case("case-a")
+                with self.assertRaises(ProviderError):
+                    client.complete([{"role": "user", "content": "test"}])
+                self.assertEqual(client.can_continue_after_format_error, index == 0)
+            finally:
+                ledger.close()
 
     def test_success_records_actual_usage_without_key(self):
         sent = []

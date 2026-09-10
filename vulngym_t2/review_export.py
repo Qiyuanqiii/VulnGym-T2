@@ -18,6 +18,12 @@ MAX_FILE_BYTES = 20_000_000
 MAX_RECORDS = 500
 MAX_CELL_CHARS = 8_000
 _ERROR_FIELDS = ("errors", "model_errors", "tool_errors", "pipeline_errors")
+_REVISION_BASIS_LABELS = {
+    "behavior_at_revision": "源码机制依据", "affected_range_and_source": "影响范围+源码",
+    "inspected_only": "仅检查过", "unknown": "未建立",
+}
+_SELF_REVIEW_LABELS = {"not_requested": "未请求（不是失败）", "completed": "已完成机器自查",
+                       "failed": "机器自查失败"}
 _ARGUMENTS = ("commit", "path", "file", "start_line", "end_line", "before", "after",
               "ref", "revision", "query", "pattern", "limit", "max_results", "glob", "prefix", "offset", "paths")
 _RESULT_METADATA = ("commit", "path", "file", "start_line", "end_line", "before", "after",
@@ -116,7 +122,8 @@ def _count(summary: dict, name: str, expected: int | None = None, *, required=Tr
 def _validate(summary: dict, entries: list[dict], reviews: list[dict]) -> dict[str, dict]:
     entry_map, review_map = _index(entries), _index(reviews)
     _require(isinstance(summary.get("status"), str) and bool(summary["status"]), "run_status_required")
-    _require(summary["status"] in {"completed", "provider_stopped"}, "finished_run_required")
+    _require(summary["status"] in {"completed", "completed_with_errors", "provider_stopped"},
+             "finished_run_required")
     provider = summary.get("provider", {})
     _require(isinstance(provider, dict), "provider_summary_invalid")
     for review in reviews:
@@ -169,6 +176,18 @@ def _validate(summary: dict, entries: list[dict], reviews: list[dict]) -> dict[s
                         ("pipeline_error_count", "pipeline_errors")):
         _count(summary, name, sum(len(review[field]) for review in reviews), required=False)
     _count(summary, "jobs_with_model_errors", sum(bool(row["model_errors"]) for row in reviews), required=False)
+    _count(summary, "format_failure_count", required=summary["status"] == "completed_with_errors")
+    if summary["status"] == "completed_with_errors":
+        _require(summary["format_failure_count"] > 0, "format_failure_count_invalid")
+        _count(summary, "unprocessed_input_count", 0)
+    if "case_failures" in summary:
+        failures = summary["case_failures"]
+        _require(isinstance(failures, list), "case_failures_invalid")
+        for failure in failures:
+            _require(isinstance(failure, dict)
+                     and isinstance(failure.get("report_id"), str)
+                     and isinstance(failure.get("code"), str)
+                     and type(failure.get("continued")) is bool, "case_failures_invalid")
     for name in ("model_calls", "tool_calls"):
         _count(summary, name, sum(review[name] for review in reviews), required=False)
     requested = "requested_input_count" in summary
@@ -179,7 +198,8 @@ def _validate(summary: dict, entries: list[dict], reviews: list[dict]) -> dict[s
         _count(summary, "unprocessed_input_count")
         _require(summary["requested_input_count"] == len(reviews) + summary["unprocessed_input_count"],
                  "summary_count_mismatch")
-        _require(summary["status"] != "completed" or summary["unprocessed_input_count"] == 0,
+        _require(summary["status"] not in {"completed", "completed_with_errors"}
+                 or summary["unprocessed_input_count"] == 0,
                  "completed_run_has_unprocessed_inputs")
     return entry_map
 
@@ -207,6 +227,20 @@ def _fields(title: str, fields: dict) -> list[str]:
                                    if fields else ["无记录。", ""])]
 
 
+def _revision_basis_label(assessment: dict) -> str:
+    if "revision_basis" not in assessment:
+        return "旧记录未声明"
+    value = assessment["revision_basis"]
+    return _REVISION_BASIS_LABELS.get(value, "未识别声明") if isinstance(value, str) else "未识别声明"
+
+
+def _self_review_status_label(review: dict) -> str:
+    if "self_review_status" not in review:
+        return "旧记录未声明"
+    value = review["self_review_status"]
+    return _SELF_REVIEW_LABELS.get(value, "未识别声明") if isinstance(value, str) else "未识别声明"
+
+
 def render_packet(summary: dict, entries: list[dict], reviews: list[dict]) -> str:
     """Validate saved record structure and render an inert Markdown packet."""
     entry_map = _validate(summary, entries, reviews)
@@ -219,8 +253,14 @@ def render_packet(summary: dict, entries: list[dict], reviews: list[dict]) -> st
     summary_keys = ("status", "input_count", "requested_input_count", "unprocessed_input_count", "candidate_count",
                     "entry_count", "schema_entry_count", "draft_count", "input_failure_count", "report_count",
                     "human_verified_count", "model_calls", "tool_calls", "model_error_count", "tool_error_count",
-                    "pipeline_error_count", "jobs_with_model_errors", "elapsed_seconds")
+                    "pipeline_error_count", "jobs_with_model_errors", "format_failure_count", "elapsed_seconds")
     lines += _table(("已记录指标", "值"), ((key, summary[key]) for key in summary_keys if key in summary))
+    if summary["status"] == "completed_with_errors":
+        lines += ["批次已处理完但含格式错误（completed_with_errors）：全部输入已处理，至少一项格式失败；不是全成功。失败输入仍是草稿，不因导出而补成完整候选。", ""]
+    if summary.get("case_failures"):
+        lines += ["### 已记录逐项格式失败", ""]
+        lines += _table(("公告", "错误代码", "失败后是否继续批次"),
+                        ((item["report_id"], item["code"], item["continued"]) for item in summary["case_failures"]))
     provider = summary.get("provider", {})
     if summary["status"] == "provider_stopped" or provider.get("halted"):
         lines += ["提供方已停止（provider_stopped）：已保存处理被中止。未处理输入没有逐条复核章节；本材料包不会恢复运行。", ""]
@@ -232,6 +272,7 @@ def render_packet(summary: dict, entries: list[dict], reviews: list[dict]) -> st
         lines += [f"## 逐条复核 {number}：{_cell(review['entry_id'])}", ""]
         lines += _table(("已记录身份 / 状态", "值"),
                         ((key, review.get(key)) for key in ("entry_id", "report_id", "source_link", "status", "verification")))
+        lines += ["机器自查状态：" + _self_review_status_label(review) + "。机器自查不等于独立人工审核。", ""]
         if review["status"] == "complete":
             lines += _fields("完整字段（按 entry_id 匹配 entries.jsonl）", entry_map[review["entry_id"]])
         else:
@@ -240,6 +281,9 @@ def render_packet(summary: dict, entries: list[dict], reviews: list[dict]) -> st
             lines += _fields("草稿字段（review.jsonl；不是完整条目）", review["draft_fields"])
             lines += _fields("建议值（未验证；不是已采纳字段）", review["suggested_values"])
         lines += ["### 字段判断（已记录机器复核）", ""]
+        lines += ["版本判断依据（已记录机器声明）："
+                  + _revision_basis_label(review["field_reviews"].get("commit", {}))
+                  + "。机器声明不等于人工审核；缺少旧字段不会改变原有状态，也不会补造版本依据。", ""]
         known = {item["id"] for item in review["evidence"]}
         rows = []
         for field, assessment in sorted(review["field_reviews"].items()):

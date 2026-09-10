@@ -71,6 +71,18 @@ class PendingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "^pending_processed_prefix_mismatch$"):
             plan_pending(self.input, self.run)
 
+    def test_completed_with_errors_has_no_pending_and_requires_all_inputs(self):
+        self.summary["status"] = "completed_with_errors"
+        self.write_run()
+        with self.assertRaisesRegex(ValueError, "pending_completed_run_has_unprocessed_inputs"):
+            plan_pending(self.input, self.run)
+        self.reviews.append({"report_id": IDS[3], "entry_id": "entry-00003", "source_link": URLS[3], "status": "draft"})
+        self.summary.update(input_count=4, unprocessed_input_count=0, draft_count=2)
+        self.write_run()
+        plan = plan_pending(self.input, self.run)
+        self.assertEqual(plan["pending_input_count"], 0)
+        self.assertEqual(plan["source_status"], "completed_with_errors")
+
     def test_duplicate_report_or_entry_ids_are_refused(self):
         self.input.write_text("\n".join(URLS + [URLS[0]]), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "^pending_duplicate_input_report_id$"):

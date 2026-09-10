@@ -4,7 +4,7 @@
 
 The product is isolated: all production imports remain inside `vulngym_t2` or
 Python's standard library. A fresh import of `vulngym_t2.cli` loads **zero
-`vulngym_agent` modules**. The source distribution now needs the **17 Python files**
+`vulngym_agent` modules**. The source distribution now needs the **18 Python files**
 below, not the legacy project, orchestrator, finalizers or benchmark packages.
 
 The four vendored implementations preserve their original behavior. Mechanical
@@ -14,7 +14,7 @@ module, without legacy prompts, backend orchestration or replay machinery.
 
 This is a standalone **source archive**, not a wheel or a claim that vulnerability
 quality acceptance is complete. The builder is `scripts/package_t2_v2.py`; it
-selects the 17 runtime files explicitly. A fresh-process CLI check after
+selects the 18 runtime files explicitly. A fresh-process CLI check after
 extraction is still required: a source manifest alone does not prove the full
 import path.
 
@@ -29,6 +29,7 @@ vulngym_t2/llm.py
 vulngym_t2/output.py
 vulngym_t2/pending.py
 vulngym_t2/pipeline.py
+vulngym_t2/protocol.py
 vulngym_t2/report.py
 vulngym_t2/repository.py
 vulngym_t2/review_export.py
@@ -49,6 +50,7 @@ Support provenance:
 | `_vendor/schema_adapter.py` | Original schema adapter; normalization and semantic schema checks. Imports the local models. |
 | `_vendor/models.py` | Original schema/evidence data classes; standard library only. |
 | `transport.py` | Extracted official HTTP and bounded JSON/error primitives; no legacy package dependency. |
+| `protocol.py` | Typed strict function-output schema and pure normalization into existing T2 actions; no function execution. |
 | `report.py` | Chinese assessment generation from completed public run outputs; no new model analysis. |
 | `pending.py` | Offline remaining-URL list from an exact completed-prefix comparison; no model, target or credential access. |
 | `review_export.py` | Offline reviewer Markdown from saved public results, joined by entry ID; no approval or source edits. |
@@ -73,6 +75,9 @@ tests/test_t2_v2_transport.py
 tests/test_t2_v2_history.py
 tests/test_t2_v2_pending.py
 tests/test_t2_v2_review_export.py
+tests/test_t2_v2_protocol.py
+tests/test_t2_v2_report.py
+tests/test_t2_v2_batch_recovery.py
 ```
 
 The intake/repository and output tests now import the vendored schema adapter.
@@ -138,7 +143,7 @@ python -E -s -B -m vulngym_t2 --help
 
 解压目录必须与原工程分离，且不需要复制 `vulngym_agent`。`-E -s` 忽略 Python
 环境路径和用户 site 包，避免原工程或本机扩展包意外补齐缺失依赖。压缩包根目录含
-`README.md`、`SCHEMA.md`、`LICENSE`、17 个运行源码文件、选定文档与离线测试，以及
+`README.md`、`SCHEMA.md`、`LICENSE`、18 个运行源码文件、选定文档与离线测试，以及
 `examples/t2_v2_input/` 中的四份公开公告输入；
 `DELIVERY.json` 记录准确运行文件清单、打包 Python 版本和示例数量。
 开发目录使用 `README_T2_V2.md`；解压后该文件命名为 `README.md`，随附的
@@ -152,7 +157,7 @@ python -E -s -B -m vulngym_t2 --help
 相对路径以映射文件为基准，详细离线预检查命令见该目录 README。打包脚本不会递归
 收集 runtime、实际 repo-map、目标仓库、密钥、账本或未选择的运行输出。
 
-V4.1 迭代另显式加入四个 `v41/` 输入文件：完整批次 URL 顺序、两份减线索公告、使用相对仓库占位路径的 JSONL。新公开结果按顺序追加为 `run-04` 至 `run-07`，分别为完整材料首批、首批未开始项、减线索首批、减线索未开始项。含失败和自查未完成的草稿，不筛掉错误；详见 `docs/t2_v41_results.md`。当前七示例交付含 96 个文件，运行源码仍为 17 个。
+V4.1 迭代另显式加入四个 `v41/` 输入文件：完整批次 URL 顺序、两份减线索公告、使用相对仓库占位路径的 JSONL。新公开结果按顺序追加为 `run-04` 至 `run-07`，分别为完整材料首批、首批未开始项、减线索首批、减线索未开始项。含失败和自查未完成的草稿，不筛掉错误；详见 `docs/t2_v41_results.md`。后续格式/版本修复增加 protocol.py 和3个针对性测试文件，当前七示例交付含 100 个文件，运行源码为 18 个；七个真实示例仍是修复前的记录。
 
 接收者自行提供已经准备好的本地 Git 仓库和公开公告；包不包含目标仓库、Git 对象、
 私有基准或答案数据。以 `D:\materials\advisory.md` 和 `D:\repos\project` 为例：
@@ -191,7 +196,7 @@ python -B scripts/package_t2_v2.py --output D:\T2\delivery\vulngym-t2-v2.zip --e
 
 ## Release verification and lesson
 
-Before distributing an archive, stage only the 17 runtime files plus explicitly
+Before distributing an archive, stage only the 18 runtime files plus explicitly
 selected delivery/test files in a new D-drive directory, with no legacy checkout
 on `PYTHONPATH`. Run `--help`, a synthetic local preflight and the explicitly
 named focused tests. Check that importing the CLI and report module leaves no

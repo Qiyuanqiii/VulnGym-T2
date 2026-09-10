@@ -8,13 +8,13 @@
 
 ## 独立模块与数据流
 
-当前 `vulngym_t2` 包含 **17 个 Python 模块（计入三个包入口文件和离线辅助命令）**，运行时只导入本包和标准库，不再导入旧 `vulngym_agent` 或 sealed/orchestrator 路径。有用的低层实现收进 `_vendor`，模型 HTTP 通信由本包 `transport` 承担；交付不依赖旧大工程的隐式导入链，也没有再搭一个 agent 框架。
+当前 `vulngym_t2` 包含 **18 个 Python 模块（计入三个包入口文件和离线辅助命令）**，运行时只导入本包和标准库，不再导入旧 `vulngym_agent` 或 sealed/orchestrator 路径。有用的低层实现收进 `_vendor`，模型 HTTP 通信由本包 `transport` 承担；交付不依赖旧大工程的隐式导入链，也没有再搭一个 agent 框架。
 
 | 模块组 | 文件与责任 |
 |---|---|
 | 输入与入口（5） | `__init__`、`__main__`、`cli`、`intake`、`pending`：参数、材料、批次调度与离线未开始清单。 |
 | 分析与产物（5） | `repository`、`pipeline`、`output`、`report`、`review_export`：读源码、模型循环、终检、离线自评与复核阅读材料。 |
-| 模型通信（2） | `llm`、`transport`：JSON 请求、显式模型 ID、用量与同授权账本、停止状态。 |
+| 模型通信（3） | `llm`、`transport`、`protocol`：兼容 JSON / 显式严格函数输出、模型 ID、用量与同授权账本、分级停止状态。 |
 | 随包基础实现（5） | `_vendor/__init__`、`bounded_process`、`git_repository`、`models`、`schema_adapter`：受限进程、Git 对象与格式规则。 |
 
 ```text

@@ -9,7 +9,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULES = ("__init__", "__main__", "cli", "intake", "llm", "output", "pending", "pipeline", "repository", "report", "review_export", "transport")
+MODULES = ("__init__", "__main__", "cli", "intake", "llm", "output", "pending", "pipeline", "protocol", "repository", "report", "review_export", "transport")
 VENDOR = ("__init__", "bounded_process", "git_repository", "models", "schema_adapter")
 DOCS = ("t2_v2_design", "t2_v2_demo", "t2_v2_packaging", "t2_v2_iteration_history", "t2_v2_results", "t2_goals", "t2_case_notes", "t2_v41_results")
 PUBLIC_RESULTS = ("entries.jsonl", "reports.jsonl", "review.jsonl", "actions.jsonl", "summary.json", "assessment.md")

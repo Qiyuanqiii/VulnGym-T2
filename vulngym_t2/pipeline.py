@@ -49,6 +49,8 @@ Reply with ONE JSON object, in one of these forms:
  "reason":"brief evidence-based decision","evidence_refs":["E0001"],
  "suggested_value":"optional, explicitly unverified"}},
  "summary":"brief assessment and remaining limitations"}
+For field_reviews.commit also declare revision_basis as exactly one of:
+behavior_at_revision | affected_range_and_source | inspected_only | unknown.
 
 Allowed read tools and arguments:
 inspect_commit(commit); list_files(commit,prefix?,offset?,limit?);
@@ -97,6 +99,16 @@ and actual source evidence. Explicit input vulnerable_commit is also a claim to
 check, not permission to skip source inspection. Missing fixes do not prevent
 using available history/source and reporting useful partial fields. Do not
 silently substitute HEAD or a patch commit as the vulnerable revision.
+For commit, behavior_at_revision means the cited source at that exact SHA shows
+the relevant defective mechanism; affected_range_and_source means an affected
+range is connected to that SHA and the mechanism is also supported by its source.
+Either basis requires a successful read_file citation containing actual source
+at the selected full SHA and a brief reason connecting the mechanism to that
+revision. No fix commit or official version table is mandatory. Merely inspecting
+a SHA, HEAD, a tag, or a fix parent is inspected_only, not supported; use unknown
+when no basis is established. For inspected_only, unknown, or a missing basis,
+leave commit uncertain with the candidate SHA as suggested_value. These are
+structured model declarations, not independent verification of their semantics.
 Descriptions and reasons are claims too: a verbatim location match does not
 validate its explanation. Keep inspected commit, its parents, and selected
 revision distinct in prose; never label a parent SHA as the fix SHA. State
@@ -196,7 +208,7 @@ def produce(job, client, repo, max_calls=8, max_tool_calls=24):
     result = {
         "report_id": job.get("report_id"), "entry_id": job.get("entry_id"),
         "fields": {}, "field_reviews": {}, "evidence": [], "actions": [],
-        "model_calls": 0, "tool_calls": 0, "errors": [],
+        "model_calls": 0, "tool_calls": 0, "errors": [], "self_review_status": "not_requested",
     }
     evidence_by_id, seen_requests, advisory_seeds = {}, {}, {}
     immutable = {"entry_id", "report_id", "source_link", "origin", "verify"}
@@ -225,6 +237,7 @@ def produce(job, client, repo, max_calls=8, max_tool_calls=24):
             "status": "missing", "reason": "Not established from available evidence.",
             "evidence_refs": [],
         }
+    result["field_reviews"]["commit"]["revision_basis"] = "unknown"
     for name in ("entry_id", "report_id", "source_link", "repo_url"):
         if job.get(name):
             supported(name, job[name], "Supplied input metadata.", [input_id])
@@ -239,7 +252,7 @@ def produce(job, client, repo, max_calls=8, max_tool_calls=24):
     if job.get("vulnerable_commit"):
         result["field_reviews"]["commit"] = {
             "status": "uncertain", "reason": "Input revision is a candidate requiring source and vulnerability evidence.",
-            "evidence_refs": [input_id], "suggested_value": job["vulnerable_commit"],
+            "evidence_refs": [input_id], "suggested_value": job["vulnerable_commit"], "revision_basis": "unknown",
         }
 
     remaining_doc_chars = _MAX_DOCUMENT_CHARS
@@ -354,6 +367,8 @@ def produce(job, client, repo, max_calls=8, max_tool_calls=24):
     ]
 
     def merge_draft(reply):
+        from .output import _commit_support_problem, _revision_basis
+
         proposed = reply.get("fields") if isinstance(reply.get("fields"), dict) else {}
         reviews = reply.get("field_reviews") if isinstance(reply.get("field_reviews"), dict) else {}
         for name in ENTRY_FIELDS:
@@ -365,7 +380,8 @@ def produce(job, client, repo, max_calls=8, max_tool_calls=24):
             status = review.get("status", "uncertain")
             if not isinstance(status, str) or status not in _STATUSES:
                 status = "uncertain"
-            reason = _short(review.get("reason", ""))
+            reason = review.get("reason")
+            reason = _short(reason.strip()) if isinstance(reason, str) else ""
             supplied_refs = review.get("evidence_refs", [])
             refs = [ref for ref in supplied_refs if isinstance(ref, str) and ref in evidence_by_id and
                     evidence_by_id[ref].get("success") is not False] if isinstance(supplied_refs, list) else []
@@ -374,6 +390,13 @@ def produce(job, client, repo, max_calls=8, max_tool_calls=24):
             if status == "supported" and (not refs or not reason or value is None):
                 status = "uncertain" if value is not None else "missing"
                 reason = "Supported claim lacked a value, a brief reason, or valid current evidence references. " + reason
+            if name == "commit":
+                basis = _revision_basis(review.get("revision_basis"))
+                if status == "supported":
+                    problem = _commit_support_problem(value, basis, reason, refs, evidence_by_id)
+                    if problem is not None:
+                        status = "uncertain"
+                        reason = problem[1] + " " + reason
             if name in advisory_seeds and status == "supported":
                 if name == "vuln_ids" and isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value):
                     value = sorted(set(advisory_seeds[name][0]) | {item.upper() for item in value},
@@ -396,6 +419,8 @@ def produce(job, client, repo, max_calls=8, max_tool_calls=24):
                 result["field_reviews"][name] = seed_review
                 continue
             normalized = {"status": status, "reason": reason or "The model did not establish this field.", "evidence_refs": refs}
+            if name == "commit":
+                normalized["revision_basis"] = basis
             if status == "supported":
                 result["fields"][name] = value
             else:
@@ -432,6 +457,10 @@ def produce(job, client, repo, max_calls=8, max_tool_calls=24):
             return None
         result["model_calls"] += 1
         result["actions"].append({"action": "model_call", "stage": stage, "call": result["model_calls"]})
+        if stage == "self_review":
+            # The attempted review stays failed until a valid draft is merged.
+            # A budget/context guard above does not count as a requested review.
+            result["self_review_status"] = "failed"
         try:
             reply = client.complete(copy.deepcopy(messages))
         except Exception as exc:
@@ -502,10 +531,13 @@ def produce(job, client, repo, max_calls=8, max_tool_calls=24):
                     "note": "Mechanical checks only, not proof of semantic correctness. Correct only from already read evidence; keep genuinely unknown fields unknown."}
         result["actions"].append({"action": "draft_validation", **feedback})
         messages.append({"role": "user", "content": _json({"draft_validation": feedback})})
-        messages.append({"role": "user", "content": "ONE bounded self-review: compare this draft with the already shown advisory/history/source evidence. Recheck vulnerable revision (not blindly the fix parent), exact code locations, reachability, and each field's evidence. Also check desc and reason: keep fix/parent/selected SHA roles distinct, label advisory-only premises, and omit or narrow unsupported route/permission/impact claims. A byte match does not validate prose; downgrade an uncertain essential field. Return action=draft only, with brief corrections or uncertainty. Omitted fields retain their prior status; explicitly mark any disputed field uncertain/conflicting with suggested_value. No tools. This is model self-review, not human validation."})
+        messages.append({"role": "user", "content": "ONE bounded self-review: compare this draft with the already shown advisory/history/source evidence. Recheck vulnerable revision (not blindly the fix parent), exact code locations, reachability, and each field's evidence. For commit explicitly recheck revision_basis: only behavior_at_revision or affected_range_and_source with actual read_file evidence at that SHA and a brief mechanism-to-revision reason can remain supported; inspected_only or unknown must stay uncertain with suggested_value. Also check desc and reason: keep fix/parent/selected SHA roles distinct, label advisory-only premises, and omit or narrow unsupported route/permission/impact claims. A byte match does not validate prose; downgrade an uncertain essential field. Return action=draft only, with brief corrections or uncertainty. Omitted fields retain their prior status; explicitly mark any disputed field uncertain/conflicting with suggested_value. No tools. This is model self-review, not human validation."})
         review_reply = complete("self_review")
-        if review_reply is not None and review_reply.get("action") == "draft":
+        if (review_reply is not None and review_reply.get("action") == "draft"
+                and isinstance(review_reply.get("fields"), dict)
+                and isinstance(review_reply.get("field_reviews"), dict)):
             merge_draft(review_reply)
+            result["self_review_status"] = "completed"
             result["actions"].append({"action": "self_review", "summary": _short(review_reply.get("summary", ""), 1_000)})
         elif review_reply is not None:
             error("Self-review must return a draft; additional tools/repair were not executed.")

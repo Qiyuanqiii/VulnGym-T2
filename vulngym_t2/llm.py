@@ -13,7 +13,7 @@ import re
 import time
 from typing import Any
 
-from . import transport
+from . import protocol, transport
 
 MODEL = transport.MODEL_ID
 MAX_AUTHORIZED_REQUESTS = 500
@@ -134,7 +134,7 @@ class DeepSeekClient:
     def __init__(self, api_key: str, ledger: RequestLedger, *, run_id: str,
                  max_requests: int = 80, max_tokens: int = 8192,
                  reasoning_effort: str = "high", timeout: float = 300, send=None, progress=None,
-                 model: str = MODEL):
+                 model: str = MODEL, response_mode: str = "json"):
         if not isinstance(api_key, str) or not api_key or not all(33 <= ord(c) <= 126 for c in api_key):
             raise ValueError("api_key_missing_or_invalid")
         if type(max_requests) is not int or not 1 <= max_requests <= MAX_AUTHORIZED_REQUESTS:
@@ -143,18 +143,50 @@ class DeepSeekClient:
             raise ValueError("output_token_limit_invalid")
         if reasoning_effort not in {"low", "high", "max"} or not 1 <= timeout <= 300:
             raise ValueError("provider_settings_invalid")
+        if not isinstance(response_mode, str) or response_mode not in {"json", "strict_tool"}:
+            raise ValueError("provider_response_mode_invalid")
         self.model = transport.validate_model_id(model)
         if self.model != ledger.model:
             raise ValueError("ledger_authorization_mismatch")
         self._key, self.ledger, self.run_id = api_key, ledger, run_id
         self.max_requests, self.max_tokens = max_requests, max_tokens
         self.reasoning_effort, self.timeout = reasoning_effort, timeout
-        self._send = send or transport._post_official
+        self.response_mode = response_mode
+        self._send = send or (transport._post_official_strict if response_mode == "strict_tool" else transport._post_official)
         self.calls = 0
         self.case_id = "unassigned"
         self.halted = None
         self.events: list[dict] = []
         self._progress = progress
+        self._attempted_cases: set[str] = set()
+        self._failed_format_cases: set[str] = set()
+        self._format_failure = None
+        self.format_failure_continuations: list[dict] = []
+
+    @property
+    def can_continue_after_format_error(self) -> bool:
+        return bool(self._format_failure is not None and self.halted == self._format_failure["code"])
+
+    def start_next_case(self, case_id: str, continue_on_format_error: bool = False) -> bool:
+        """Optionally isolate one finished format failure, never retry its case."""
+        if not isinstance(case_id, str) or not 1 <= len(case_id) <= 256 or any(ord(c) < 32 for c in case_id):
+            raise ValueError("case_id_invalid")
+        if type(continue_on_format_error) is not bool:
+            raise ValueError("continue_on_format_error_invalid")
+        if case_id in self._failed_format_cases:
+            raise ProviderError("format_failure_case_cannot_be_retried")
+        resumed = False
+        if self.halted:
+            if not continue_on_format_error or not self.can_continue_after_format_error:
+                raise ProviderError(self.halted)
+            if case_id == self._format_failure["case_id"] or case_id in self._attempted_cases:
+                raise ProviderError("format_failure_case_cannot_be_retried")
+            self.format_failure_continuations.append(dict(self._format_failure, next_case_id=case_id))
+            self.halted = None
+            self._format_failure = None
+            resumed = True
+        self.case_id = case_id
+        return resumed
 
     def _notify(self, event, number, **detail):
         if self._progress:
@@ -166,15 +198,27 @@ class DeepSeekClient:
     def complete(self, messages):
         if self.halted:
             raise ProviderError(self.halted)
+        if self.case_id in self._failed_format_cases:
+            self.halted = "format_failure_case_cannot_be_retried"
+            raise ProviderError(self.halted)
         if self.calls >= self.max_requests:
             self.halted = "run_request_limit_reached"
             raise ProviderError(self.halted)
         if not isinstance(messages, list) or not messages:
             raise ValueError("messages_required")
-        body = _wire({"model": self.model, "messages": messages,
-                      "thinking": {"type": "enabled"}, "reasoning_effort": self.reasoning_effort,
-                      "response_format": {"type": "json_object"},
-                      "max_tokens": self.max_tokens, "stream": False})
+        payload = {"model": self.model, "messages": messages,
+                   "thinking": {"type": "enabled"}, "reasoning_effort": self.reasoning_effort,
+                   "max_tokens": self.max_tokens, "stream": False}
+        if self.response_mode == "strict_tool":
+            # The normalized reply remains ordinary text history. Native calls
+            # and hidden reasoning are neither replayed nor executed here.
+            payload["messages"] = list(messages) + [{"role": "system", "content": protocol.STRICT_PROTOCOL_INSTRUCTION}]
+            payload["tools"] = [protocol.strict_tool_definition()]
+            # Official thinking mode rejects required/named tool choices.
+            payload["tool_choice"] = "auto"
+        else:
+            payload["response_format"] = {"type": "json_object"}
+        body = _wire(payload)
         if len(body) > transport.MAX_REQUEST_BYTES:
             raise ProviderError("request_context_too_large")
         try:
@@ -183,10 +227,12 @@ class DeepSeekClient:
             self.halted = str(exc)
             raise
         self.calls += 1
+        self._attempted_cases.add(self.case_id)
         self._notify("http_started", number)
         start = time.monotonic()
         usage = None
         diagnostics = None
+        parsing_response = False
         try:
             raw = self._send(body, self._key, self.timeout)
             envelope = transport._strict_object(raw)
@@ -208,7 +254,8 @@ class DeepSeekClient:
                 keys = ("prompt_tokens", "completion_tokens", "total_tokens")
                 if all(type(reported.get(key)) is int and 0 <= reported[key] <= 1_000_000_000 for key in keys):
                     usage = {key: reported[key] for key in keys}
-            result = dict(transport.parse_chat_response(raw, expected_model=self.model))
+            parsing_response = True
+            result = dict(transport.parse_chat_response(raw, expected_model=self.model, response_mode=self.response_mode))
         except Exception as exc:
             code = getattr(exc, "error_code", None)
             if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,95}", code):
@@ -216,6 +263,10 @@ class DeepSeekClient:
             # Stop this client after any transport/format error: no implicit
             # retries, repeated authentication prompts or silent account changes.
             self.halted = code
+            self._format_failure = ({"request": number, "case_id": self.case_id, "code": code}
+                                    if parsing_response and isinstance(exc, transport._CompletionJSONBlocked) else None)
+            if self._format_failure is not None:
+                self._failed_format_cases.add(self.case_id)
             safe_detail = getattr(exc, "diagnostic", None)
             if isinstance(safe_detail, dict):
                 allowed = {"phase", "json_error_kind", "json_decode_message", "json_decode_line", "json_decode_column",
@@ -223,6 +274,8 @@ class DeepSeekClient:
                            "answer_first_nonspace_category", "answer_contains_code_fence", "outer_code_fence_unwrapped"}
                 diagnostics = {**(diagnostics or {}), **{name: value for name, value in safe_detail.items()
                     if name in allowed and (value is None or type(value) in (bool, int) or isinstance(value, str) and len(value) <= 200)}}
+            diagnostics = {**(diagnostics or {}), "response_mode": self.response_mode,
+                           "format_error_isolatable": self.can_continue_after_format_error}
             self.ledger.finish(number, status="error", usage=usage,
                                seconds=time.monotonic() - start, code=code, diagnostics=diagnostics)
             self.events.append({"request": number, "case_id": self.case_id,
@@ -243,6 +296,9 @@ class DeepSeekClient:
         usage = {key: sum((row.get("usage") or {}).get(key, 0) for row in self.events)
                  for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
         return {"model": self.model, "http_attempts": self.calls, "run_request_limit": self.max_requests,
+                "response_mode": self.response_mode,
+                "api_path": transport.STRICT_API_PATH if self.response_mode == "strict_tool" else transport.API_PATH,
+                "format_failure_continuations": list(self.format_failure_continuations),
                 "max_tokens_per_request": self.max_tokens, "reasoning_effort": self.reasoning_effort,
                 "timeout_seconds": self.timeout, "automatic_retries": 0,
                 "usage": usage, "halted": self.halted, **self.ledger.summary()}

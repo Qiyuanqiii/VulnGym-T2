@@ -114,6 +114,7 @@ def source_draft(messages):
     for name in fields:
         refs = [advisory["id"], read["id"]] if name in {"commit", "entry_point", "critical_operation"} else [advisory["id"]]
         reviews[name] = {"status": "supported", "reason": "The shown source and advisory agree on the unrestricted expression behavior.", "evidence_refs": refs}
+    reviews["commit"]["revision_basis"] = "behavior_at_revision"
     return {"action": "draft", "fields": fields, "field_reviews": reviews, "summary": "Source inspected; automatic assessment only."}
 
 
@@ -131,6 +132,52 @@ def metadata_job():
 
 
 class PipelineTests(unittest.TestCase):
+    def test_commit_basis_is_required_despite_a_source_read(self):
+        for basis in (None, "inspected_only", "unknown", "invented", []):
+            with self.subTest(basis=basis):
+                def draft(messages):
+                    reply = source_draft(messages)
+                    if basis is None:
+                        reply["field_reviews"]["commit"].pop("revision_basis")
+                    else:
+                        reply["field_reviews"]["commit"]["revision_basis"] = basis
+                    return reply
+                result = produce(job(False), StubClient(choose_source, draft, retain_review), StubRepo())
+                self.assertNotIn("commit", result["fields"])
+                review = result["field_reviews"]["commit"]
+                self.assertEqual(review["status"], "uncertain")
+                self.assertEqual(review["suggested_value"], VULNERABLE)
+                self.assertEqual(review["revision_basis"], basis if basis in ("inspected_only", "unknown") else "unknown")
+                self.assertEqual(result["fields"]["vuln_title"], "Expression execution")
+                self.assertEqual(result["model_calls"], 3)
+
+    def test_commit_basis_can_be_corrected_in_the_existing_self_review(self):
+        def incomplete(messages):
+            reply = source_draft(messages)
+            reply["field_reviews"]["commit"].pop("revision_basis")
+            return reply
+
+        def correct(messages):
+            self.assertIn("revision_basis", messages[-1]["content"])
+            return source_draft(messages)
+
+        result = produce(job(False), StubClient(choose_source, incomplete, correct), StubRepo())
+        self.assertEqual(result["fields"]["commit"], VULNERABLE)
+        self.assertEqual(result["field_reviews"]["commit"]["revision_basis"], "behavior_at_revision")
+        self.assertEqual(result["model_calls"], 3)
+        self.assertEqual(result["tool_calls"], 1)
+        self.assertEqual(sum(item.get("stage") == "self_review" for item in result["actions"]), 1)
+
+    def test_commit_basis_with_only_history_evidence_remains_uncertain(self):
+        draft = {"action": "draft", "fields": {"commit": VULNERABLE}, "field_reviews": {
+            "commit": {"status": "supported", "revision_basis": "behavior_at_revision",
+                       "reason": "A claimed mechanism at this parent has not actually been read.", "evidence_refs": ["E0004", "E0005"]}}}
+        result = produce(job(), StubClient(draft, retain_review), StubRepo(), max_calls=2)
+        self.assertNotIn("commit", result["fields"])
+        self.assertEqual(result["field_reviews"]["commit"]["suggested_value"], VULNERABLE)
+        self.assertEqual(result["field_reviews"]["commit"]["revision_basis"], "behavior_at_revision")
+        self.assertEqual(result["model_calls"], 2)
+
     def test_no_fix_input_can_request_local_history_before_source_reads(self):
         class HistoryRepo(StubRepo):
             def call(self, tool, arguments):
@@ -203,6 +250,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["fields"]["verify"], 0)
         self.assertEqual(result["model_calls"], 3)
         self.assertEqual(result["tool_calls"], 3)
+        self.assertEqual(result["self_review_status"], "completed")
         self.assertEqual([name for name, _ in repo.calls], ["inspect_commit", "read_diff", "read_file"])
         self.assertEqual([a["stage"] for a in result["actions"] if a["action"] == "model_call"],
                          ["plan_and_read", "plan_and_read", "self_review"])
@@ -228,12 +276,20 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(any("inspect_commit failed" in error for error in result["errors"]))
 
     def test_self_review_transport_failure_preserves_useful_draft(self):
-        client = StubClient(choose_source, source_draft, TimeoutError("do-not-log-secret"))
-        result = produce(job(), client, StubRepo())
-        self.assertEqual(result["fields"]["vuln_title"], "Expression execution")
-        self.assertEqual(result["fields"]["commit"], VULNERABLE)
-        self.assertTrue(any("self_review: TimeoutError" in error for error in result["errors"]))
-        self.assertNotIn("do-not-log-secret", json.dumps(result))
+        for response in (TimeoutError("do-not-log-secret"), json.JSONDecodeError("bad JSON", "", 0),
+                         {"action": "tools", "calls": []}, {"action": "draft", "fields": []}):
+            with self.subTest(response=type(response).__name__):
+                client = StubClient(choose_source, source_draft, response)
+                result = produce(job(), client, StubRepo())
+                self.assertEqual(result["fields"]["vuln_title"], "Expression execution")
+                self.assertEqual(result["fields"]["commit"], VULNERABLE)
+                self.assertEqual(result["self_review_status"], "failed")
+                self.assertEqual(result["model_calls"], 3)
+                self.assertTrue(result["errors"])
+                self.assertNotIn("do-not-log-secret", json.dumps(result))
+        result = produce(job(False), StubClient(retain_review), StubRepo(), max_calls=1)
+        self.assertEqual(result["self_review_status"], "not_requested")
+        self.assertEqual(result["model_calls"], 1)
 
     def test_first_transport_failure_preserves_metadata_and_history_without_commit_guess(self):
         result = produce(job(), StubClient(ConnectionError("private-token")), StubRepo())

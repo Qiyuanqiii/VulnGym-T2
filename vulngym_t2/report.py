@@ -17,6 +17,12 @@ _FIELDS = ("entry_id", "report_id", "source_link", "origin", "project", "repo_ur
            "entry_point", "critical_operation", "trace", "verify")
 _STATUS_LABELS = {"supported": "已支持（模型/控制器）", "uncertain": "不确定",
                   "missing": "缺失", "conflicting": "冲突"}
+_REVISION_BASIS_LABELS = {
+    "behavior_at_revision": "源码机制依据", "affected_range_and_source": "影响范围+源码",
+    "inspected_only": "仅检查过", "unknown": "未建立",
+}
+_SELF_REVIEW_LABELS = {"not_requested": "未请求（不是失败）", "completed": "已完成机器自查",
+                       "failed": "机器自查失败"}
 _SECRET = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b|(?i:Bearer\s+)[^\s\"']+")
 _PATH = re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/][^\s\"'<>]*|\\\\[^\s\"'<>]+|/(?:Users|home|tmp|var/tmp)/[^\s\"'<>]*)")
 
@@ -63,6 +69,38 @@ def _location(value: Any) -> str:
     return text
 
 
+def _revision_basis_label(assessment: Mapping[str, Any]) -> str:
+    if "revision_basis" not in assessment:
+        return "旧记录未声明"
+    value = assessment["revision_basis"]
+    return _REVISION_BASIS_LABELS.get(value, "未识别声明") if isinstance(value, str) else "未识别声明"
+
+
+def _self_review_status_label(review: Mapping[str, Any]) -> str:
+    if "self_review_status" not in review:
+        return "旧记录未声明"
+    value = review["self_review_status"]
+    return _SELF_REVIEW_LABELS.get(value, "未识别声明") if isinstance(value, str) else "未识别声明"
+
+
+def _validate_terminal_counts(summary: Mapping[str, Any], reviews: list[dict]) -> None:
+    """Do not describe unfinished inputs as a finished batch; keep old files readable."""
+    if summary.get("status") not in ("completed", "completed_with_errors"):
+        return
+    requires_counts = summary.get("status") == "completed_with_errors"
+    if requires_counts or "requested_input_count" in summary or "unprocessed_input_count" in summary:
+        for name in ("requested_input_count", "unprocessed_input_count"):
+            if type(summary.get(name)) is not int or summary[name] < 0:
+                raise ValueError("summary_count_invalid")
+        if summary["unprocessed_input_count"] != 0:
+            raise ValueError("completed_run_has_unprocessed_inputs")
+        if summary["requested_input_count"] != len(reviews):
+            raise ValueError("summary_count_mismatch")
+    if requires_counts and (type(summary.get("format_failure_count")) is not int
+                            or summary["format_failure_count"] < 1):
+        raise ValueError("format_failure_count_invalid")
+
+
 def _read_inputs(run_dir: Path) -> tuple[dict, list[dict]]:
     if not run_dir.is_dir():
         raise ValueError("run_directory_unavailable")
@@ -105,6 +143,7 @@ def _read_inputs(run_dir: Path) -> tuple[dict, list[dict]]:
 
 
 def _assessment(summary: Mapping[str, Any], reviews: list[dict]) -> str:
+    _validate_terminal_counts(summary, reviews)
     provider = _object(summary.get("provider"))
     usage = _object(provider.get("usage"))
     counts = Counter(review.get("status") for review in reviews if isinstance(review.get("status"), str))
@@ -118,6 +157,7 @@ def _assessment(summary: Mapping[str, Any], reviews: list[dict]) -> str:
         f"| 请求 / 已处理 / 未处理输入 | {_number(summary.get('requested_input_count'))} / {_number(summary.get('input_count'))} / {_number(summary.get('unprocessed_input_count'))} |",
         f"| 完整候选 / 草稿 / 输入失败 | {_number(summary.get('candidate_count'))} / {_number(summary.get('draft_count'))} / {_number(summary.get('input_failure_count'))} |",
         f"| 模型错误 / 工具错误 / 流程错误总项数 | {_number(summary.get('model_error_count'))} / {_number(summary.get('tool_error_count'))} / {_number(summary.get('pipeline_error_count'))} |",
+        f"| 格式失败输入数 | {_number(summary.get('format_failure_count'))} |",
         f"| 模型调用 / 仓库工具调用 | {_number(summary.get('model_calls'))} / {_number(summary.get('tool_calls'))} |",
         f"| 已记录耗时（秒） | {_number(summary.get('elapsed_seconds'))} |",
         f"| 模型 | {_md(provider.get('model'))} |",
@@ -127,6 +167,15 @@ def _assessment(summary: Mapping[str, Any], reviews: list[dict]) -> str:
         "完整候选仅指通过终检的正式条目；草稿、输入失败与未处理输入不计为完整候选。错误项数可能一份输入含多项，不等于失败公告数。HTTP 尝试包括失败尝试，且不同于模型调用次数。未知用量保持未知，不能把缺失 token 当作零。货币费用未在本报告中独立核算。", "",
         f"逐条 review 实际读取 **{len(reviews)}** 条：complete={counts['complete']}，draft={counts['draft']}，input_failure={counts['input_failure']}。",
     ]
+    if summary.get("status") == "completed_with_errors":
+        lines.extend(["", "**批次已处理完但含格式错误：全部输入已处理，至少一项格式失败；不是全成功。失败输入仍是草稿，不因生成报告而补成完整候选。**"])
+    failures = [item for item in _list(summary.get("case_failures")) if isinstance(item, dict)]
+    if failures:
+        lines.extend(["", "已记录逐项格式失败："])
+        for failure in failures:
+            lines.append("- 公告：" + _md(failure.get("report_id"), 100)
+                         + "；错误：" + _md(failure.get("code"), 160)
+                         + "；失败后是否继续批次：" + _md(failure.get("continued"), 20) + "。")
     expected = {"input_count": len(reviews), "candidate_count": counts["complete"],
                 "draft_count": counts["draft"], "input_failure_count": counts["input_failure"]}
     mismatches = [f"{key}：summary={summary[key]}，review={actual}" for key, actual in expected.items()
@@ -148,8 +197,12 @@ def _assessment(summary: Mapping[str, Any], reviews: list[dict]) -> str:
         lines.extend([
             f"### {index}. {_md(review.get('report_id'), 100)} / {_md(review.get('entry_id'), 80)}", "",
             f"- 状态：{_md(review.get('status'))}；公告：{_md(review.get('source_link'), 240)}。",
+            "- 机器自查状态：" + _self_review_status_label(review) + "；机器自查不等于独立人工审核。",
             f"- 已知项目 / 标题：{_md(fields.get('project'), 120)} / {_md(fields.get('vuln_title'), 320)}。",
-            f"- 漏洞 commit：{_md(fields.get('commit'), 80)}。",
+            f"- 已记录 commit（不代表已确认漏洞版本）：{_md(fields.get('commit'), 80)}。",
+            "- 版本判断依据（已记录机器声明）："
+            + _revision_basis_label(_object(field_reviews.get("commit")))
+            + "；机器声明不等于人工审核。缺少旧字段不会改变原有状态，也不会补造版本依据。",
             f"- 入口 EP：{_location(fields.get('entry_point'))}。",
             f"- 关键操作 CO：{_location(fields.get('critical_operation'))}。",
             f"- 模型 / 工具调用：{_number(review.get('model_calls'))} / {_number(review.get('tool_calls'))}；动作记录中的计划 / 工具 / 草稿 / 自查：{actions['plan']} / {actions['tool']} / {actions['draft']} / {actions['self_review']}。",

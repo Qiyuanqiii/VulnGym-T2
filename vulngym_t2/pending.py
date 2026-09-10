@@ -108,7 +108,7 @@ def plan_pending(input_path: str | Path, run_dir: str | Path) -> dict:
     summary_raw = _read(root / "summary.json", min(MAX_PUBLIC_BYTES, 1024 * 1024), "summary")
     summary = _json_object(_text(summary_raw, "summary"), "summary")
     status = summary.get("status")
-    if not isinstance(status, str) or status not in {"completed", "provider_stopped"}:
+    if not isinstance(status, str) or status not in {"completed", "completed_with_errors", "provider_stopped"}:
         raise ValueError("pending_run_boundary_uncertain")
     review_raw = _read(root / "review.jsonl", MAX_PUBLIC_BYTES - len(summary_raw), "review")
     reviews = [_json_object(line, "review")
@@ -119,7 +119,7 @@ def plan_pending(input_path: str | Path, run_dir: str | Path) -> dict:
             type(summary.get(key)) is not int or summary[key] != value
             for key, value in expected.items()):
         raise ValueError("pending_summary_count_mismatch")
-    if status == "completed" and len(reviews) != len(rows):
+    if status in {"completed", "completed_with_errors"} and len(reviews) != len(rows):
         raise ValueError("pending_completed_run_has_unprocessed_inputs")
 
     seen_reports, seen_entries, counts = set(), set(), Counter()
@@ -175,7 +175,7 @@ def export_pending(input_path: str | Path, run_dir: str | Path, output: str | Pa
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Offline export of unstarted GHSA URLs; never retries or runs a task.")
     parser.add_argument("--input", required=True, type=Path, help="original GHSA URL list, not JSONL")
-    parser.add_argument("--run-dir", required=True, type=Path, help="completed or provider_stopped run with summary and review")
+    parser.add_argument("--run-dir", required=True, type=Path, help="completed, completed_with_errors or provider_stopped run")
     parser.add_argument("--output", required=True, type=Path, help="new URL-list file outside the old run directory")
     args = parser.parse_args(argv)
     try:
