@@ -1,0 +1,4 @@
+{"source_link":"https://github.com/advisories/GHSA-cm35-v4vp-5xvx","repo_path":"/path/to/open-webui.git","repo_url":"https://github.com/open-webui/open-webui","advisory":"../cache/GHSA-CM35-V4VP-5XVX.json"}
+{"source_link":"https://github.com/advisories/GHSA-jp4j-q5fc-58gv","repo_path":"/path/to/openclaw.git","repo_url":"https://github.com/openclaw/openclaw","advisory":"../cache/GHSA-JP4J-Q5FC-58GV.json"}
+{"source_link":"https://github.com/advisories/GHSA-mq4r-h2gh-qv7x","repo_path":"/path/to/Flowise.git","repo_url":"https://github.com/FlowiseAI/Flowise","advisory":"GHSA-MQ4R-H2GH-QV7X.json"}
+{"source_link":"https://github.com/advisories/GHSA-8c4j-f57c-35cf","repo_path":"/path/to/langflow.git","repo_url":"https://github.com/langflow-ai/langflow","advisory":"GHSA-8C4J-F57C-35CF.json"}

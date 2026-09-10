@@ -18,6 +18,7 @@ PUBLIC_INPUT_FILES = (
     "cache/GHSA-JP4J-Q5FC-58GV.json", "cache/GHSA-8C4J-F57C-35CF.json",
     "cache/GHSA-MQ4R-H2GH-QV7X.json", "cache/GHSA-CM35-V4VP-5XVX.json",
     "v41/full-urls.txt", "v41/reduced-inputs.example.jsonl",
+    "v41/strict-targeted-inputs.example.jsonl",
     "v41/GHSA-8C4J-F57C-35CF.json", "v41/GHSA-MQ4R-H2GH-QV7X.json",
 )
 

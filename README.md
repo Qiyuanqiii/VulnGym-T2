@@ -8,7 +8,9 @@
 
 状态：已用 `--model deepseek-flash`（2026-09-10 官方 V4.1 Flash）完成新的真实开发运行。完整材料四份得到 Langflow、Flowise 两条完整候选，Open WebUI、OpenClaw 两份无效 JSON 失败草稿；另做减线索两份，Flowise 完整，Langflow 因读取响应正文的传输失败保留不确定草稿。停止记录不是拒绝或权限失败；后续批次只处理尚未开始项，没有自动重试。两套实验重叠使用既有四个案例，独立新样本为 0。**核心仍未达到广泛效果验收；这些不是盲测、总体准确率或导师验收通过的声明。** 最新用量、结果与剩余问题见 [V4.1 实跑记录](docs/t2_v41_results.md)，历史开发结果见 [v2 结果与自评](docs/t2_v2_results.md)；旧 3/3 不代表最新结果。
 
-本次同一授权账本累计 41 次模型请求，另有 1 次模型目录查询，共 42/500 次；已报告用量 432,465 tokens，另有 1 次传输失败请求的用量未知，不能称为精确总 token。运行已停止使用临时 key，可撤销；密钥不在交付材料中。
+随后经用户再次确认，用同一授权完成严格协议定向复测：Open WebUI 技术失败；仅接上未开始的三项后，OpenClaw 为机器完整候选，减线索 Flowise 为证据不足草稿，减线索 Langflow 为函数参数 JSON 失败草稿。OpenClaw 仍有入口位置及版本依据措辞需要复核，不能当作已验收正确；新结果见 `examples/run-08`、`run-09`，旧失败不覆盖。这轮没有独立新样本。
+
+同一授权账本目前累计 60 次生成请求（含 2 次纯协议短测），另有 1 次目录查询，共 **61/500 次**；已报告用量 **656,871 tokens**，另有此前 1 次传输失败请求用量未知，不是精确总 token。本轮调用已结束，没有重置预算或自动重试；密钥不在交付材料中。
 
 ## 不用 key，先看真实结果
 
@@ -75,7 +77,9 @@ python -m vulngym_t2 --advisory D:\T2\materials\advisory.md --repo D:\T2\repos\p
 
 在正式命令末尾添加 `--response-mode strict_tool`，可显式启用 [DeepSeek 严格函数输出（Beta）](https://api-docs.deepseek.com/guides/tool_calls/)：通过官方 `/beta/chat/completions` 返回 `submit_step` 的结构化参数，不再把自由正文当成动作 JSON。该函数只是回答容器，仍只能经原控制器使用七种只读工具，不执行模型自造函数。保留 thinking 与原 reasoning_effort；使用 `tool_choice=auto`，因为供应商不支持 thinking 下强制 required/指定函数。客户端只接受单个正确容器，未调用容器、多函数或无效参数都会明确失败，不猜补、不静默切回旧模式。
 
-省略参数仍为 `json`，兼容旧脚本。**严格模式已实现并做离线协议验证，但尚未真实服务复测，不能声称已消除供应商格式错误。** 旧样例不是严格模式成绩。
+如需强制回答容器，显式添加 `--response-mode strict_tool --thinking disabled`。这会关闭供应商 thinking，使用 `tool_choice=required` 并省略不适用的 `reasoning_effort`；并非同一推理配置的等价替换，实际设置记在 summary。它不会增加执行能力，仍只接受一个合法 `submit_step`；鉴权、权限、拒绝、网络等错误仍停止，没有正文回退或自动重试。官方说明见 [Chat Completions 参数](https://api-docs.deepseek.com/api/create-chat-completion/)。
+
+省略参数仍为 `json` 和 `thinking=enabled`，兼容旧脚本；`json + disabled` 会在读取密钥前明确拒绝。两种严格配置已各通过一次短协议实测，但 `enabled + auto` 在真实 run-08 第二个响应返回 `stop`，导致停止。**短协议成功不证明真实任务稳定或语义正确**；各配置的后续实际结果见实跑记录，旧样例不冒充新模式成绩。
 
 密钥优先从已配置的 `DEEPSEEK_API_KEY` 环境变量读取；若未配置，在交互式终端直接运行上面的正式命令，会出现 `Temporary DeepSeek key (hidden):`，此时输入临时授权密钥，字符不回显。不要为了设置环境变量而把真实密钥写进一条可进入 Shell 历史的赋值命令，也不要放进参数、脚本或文档。若已有环境配置，先确认它属于本次授权，不要打印其内容。
 
@@ -182,6 +186,10 @@ python -m vulngym_t2.pending --input examples/t2_v2_input/urls.txt --run-dir exa
 
 只支持不重复的 GHSA URL 列表，以及可核对的 `completed` / `completed_with_errors` / `provider_stopped` 运行。中断状态、计数/身份不符或已有输出文件会拒绝，不猜测哪一项曾发出请求；不保证源材料未变，也不恢复模型 checkpoint。若后来又分批运行过这些 URL，使用者还需核对后续记录，不能把单个旧运行的剩余清单当成全局待办。真正处理剩余输入需要明确授权和有效 key，并使用新输出目录、同一授权原有账本。
 
-可携带公开输入见 `examples/t2_v2_input/`，需按其说明配置自己的本地仓库路径。`examples/run-01`、`run-02`、`run-03` 原样保留历史混合结果、历史停止结果和旧 URL 列表结果；本次 V4.1 完整材料首批及仅未开始项续批分别见 `examples/run-04`、`run-05`，减线索首批及仅未开始项续批分别见 `examples/run-06`、`run-07`。逐项说明见 [V4.1 实跑记录](docs/t2_v41_results.md)。这些批次含重复案例，不能相加当成独立样本数。
+可携带公开输入见 `examples/t2_v2_input/`，需按其说明配置自己的本地仓库路径。`examples/run-01`、`run-02`、`run-03` 原样保留历史混合结果、历史停止结果和旧 URL 列表结果；V4.1 完整材料首批及仅未开始项续批分别见 `examples/run-04`、`run-05`，减线索首批及仅未开始项续批分别见 `examples/run-06`、`run-07`。严格协议首批和仅未开始三项续批见 `examples/run-08`、`run-09`；原四项顺序及材料组合见 `examples/t2_v2_input/v41/strict-targeted-inputs.example.jsonl`。这些批次含重复案例和不同配置，不能相加当独立样本或拼出一次全成功。逐项说明见 [V4.1 实跑记录](docs/t2_v41_results.md)。
+
+```powershell
+python -m vulngym_t2.review_export --run-dir examples/run-09 --output strict-review.md
+```
 
 短设计见 `docs/t2_v2_design.md`，交付 ZIP 另含三页 `docs/T2-design.pdf`；现场操作和人工复核见 `docs/t2_v2_demo.md`，支持现场演示，并不表示已经录制视频。官方字段定义以 `SCHEMA.md` 为准。

@@ -1,0 +1,67 @@
+{
+  "candidate_count": 1,
+  "candidate_definition": "Complete schema entries only; drafts and input failures are excluded.",
+  "case_failures": [
+    {
+      "code": "deepseek_response_invalid_json",
+      "continued": false,
+      "report_id": "GHSA-8C4J-F57C-35CF"
+    }
+  ],
+  "continue_on_format_error": true,
+  "draft_count": 2,
+  "elapsed_seconds": 56.259,
+  "entry_count": 1,
+  "files": [
+    "entries.jsonl",
+    "reports.jsonl",
+    "review.jsonl",
+    "actions.jsonl",
+    "summary.json"
+  ],
+  "format_failure_count": 1,
+  "human_verified_count": 0,
+  "input_count": 3,
+  "input_failure_count": 0,
+  "jobs_with_model_errors": 1,
+  "model_calls": 15,
+  "model_error_count": 2,
+  "pipeline_error_count": 3,
+  "provider": {
+    "api_path": "/beta/chat/completions",
+    "authorization_http_attempts": 60,
+    "authorization_limit": 499,
+    "authorization_model": "deepseek-flash",
+    "authorization_usage": {
+      "completion_tokens": 65681,
+      "prompt_tokens": 591190,
+      "total_tokens": 656871
+    },
+    "automatic_retries": 0,
+    "currency_cost_measured": false,
+    "format_failure_continuations": [],
+    "halted": "deepseek_response_invalid_json",
+    "http_attempts": 15,
+    "max_tokens_per_request": 16384,
+    "model": "deepseek-flash",
+    "reasoning_effort": null,
+    "response_mode": "strict_tool",
+    "run_request_limit": 36,
+    "thinking": "disabled",
+    "timeout_seconds": 300,
+    "tool_choice": "required",
+    "unknown_usage_attempts": 1,
+    "usage": {
+      "completion_tokens": 10548,
+      "prompt_tokens": 180749,
+      "total_tokens": 191297
+    }
+  },
+  "report_count": 1,
+  "requested_input_count": 3,
+  "schema_entry_count": 1,
+  "status": "completed_with_errors",
+  "tool_calls": 29,
+  "tool_error_count": 1,
+  "unprocessed_input_count": 0
+}

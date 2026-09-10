@@ -58,6 +58,8 @@ def parser():
                    help="exact authorized DeepSeek model ID; no alias substitution or automatic fallback")
     p.add_argument("--response-mode", choices=("json", "strict_tool"), default="json",
                    help="json compatibility mode or explicit beta strict function-output mode")
+    p.add_argument("--thinking", choices=("enabled", "disabled"), default="enabled",
+                   help="disabled requires strict_tool and forces a native call; reasoning effort is then omitted")
     p.add_argument("--stop-on-format-error", action="store_true",
                    help="stop the whole batch on a malformed answer instead of continuing only unstarted inputs")
     p.add_argument("--reasoning-effort", choices=("low", "high", "max"), default="high")
@@ -158,6 +160,8 @@ def main(argv=None):
     client = ledger = None
     secret = ""
     try:
+        if args.thinking == "disabled" and args.response_mode != "strict_tool":
+            raise ValueError("thinking_disabled_requires_strict_tool")
         jobs = load_jobs(input_path=args.input, advisory=args.advisory, repo=args.repo,
                          source_link=args.source_link, cache_dir=args.cache_dir, repo_map=args.repo_map)
         if not jobs:
@@ -188,6 +192,7 @@ def main(argv=None):
         client = DeepSeekClient(secret, ledger, run_id=datetime.now(timezone.utc).strftime("t2-%Y%m%dT%H%M%S-%f"),
                                 max_requests=args.max_requests, max_tokens=args.max_tokens,
                                 reasoning_effort=args.reasoning_effort, timeout=args.timeout, model=args.model,
+                                thinking=args.thinking,
                                 response_mode=args.response_mode,
                                 progress=lambda event: _emit(event, sys.stderr))
         secret = ""

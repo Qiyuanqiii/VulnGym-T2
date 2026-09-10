@@ -134,7 +134,7 @@ class DeepSeekClient:
     def __init__(self, api_key: str, ledger: RequestLedger, *, run_id: str,
                  max_requests: int = 80, max_tokens: int = 8192,
                  reasoning_effort: str = "high", timeout: float = 300, send=None, progress=None,
-                 model: str = MODEL, response_mode: str = "json"):
+                 model: str = MODEL, response_mode: str = "json", thinking: str = "enabled"):
         if not isinstance(api_key, str) or not api_key or not all(33 <= ord(c) <= 126 for c in api_key):
             raise ValueError("api_key_missing_or_invalid")
         if type(max_requests) is not int or not 1 <= max_requests <= MAX_AUTHORIZED_REQUESTS:
@@ -145,12 +145,18 @@ class DeepSeekClient:
             raise ValueError("provider_settings_invalid")
         if not isinstance(response_mode, str) or response_mode not in {"json", "strict_tool"}:
             raise ValueError("provider_response_mode_invalid")
+        if not isinstance(thinking, str) or thinking not in {"enabled", "disabled"}:
+            raise ValueError("provider_thinking_invalid")
+        if thinking == "disabled" and response_mode != "strict_tool":
+            raise ValueError("thinking_disabled_requires_strict_tool")
         self.model = transport.validate_model_id(model)
         if self.model != ledger.model:
             raise ValueError("ledger_authorization_mismatch")
         self._key, self.ledger, self.run_id = api_key, ledger, run_id
         self.max_requests, self.max_tokens = max_requests, max_tokens
-        self.reasoning_effort, self.timeout = reasoning_effort, timeout
+        self.thinking = thinking
+        self.reasoning_effort = reasoning_effort if thinking == "enabled" else None
+        self.timeout = timeout
         self.response_mode = response_mode
         self._send = send or (transport._post_official_strict if response_mode == "strict_tool" else transport._post_official)
         self.calls = 0
@@ -207,15 +213,18 @@ class DeepSeekClient:
         if not isinstance(messages, list) or not messages:
             raise ValueError("messages_required")
         payload = {"model": self.model, "messages": messages,
-                   "thinking": {"type": "enabled"}, "reasoning_effort": self.reasoning_effort,
+                   "thinking": {"type": self.thinking}, "reasoning_effort": self.reasoning_effort,
                    "max_tokens": self.max_tokens, "stream": False}
+        if self.thinking == "disabled":
+            del payload["reasoning_effort"]
         if self.response_mode == "strict_tool":
             # The normalized reply remains ordinary text history. Native calls
             # and hidden reasoning are neither replayed nor executed here.
             payload["messages"] = list(messages) + [{"role": "system", "content": protocol.STRICT_PROTOCOL_INSTRUCTION}]
             payload["tools"] = [protocol.strict_tool_definition()]
-            # Official thinking mode rejects required/named tool choices.
-            payload["tool_choice"] = "auto"
+            # Official thinking mode rejects required/named tool choices;
+            # explicitly disabled thinking permits a mandatory native call.
+            payload["tool_choice"] = "required" if self.thinking == "disabled" else "auto"
         else:
             payload["response_format"] = {"type": "json_object"}
         body = _wire(payload)
@@ -297,6 +306,9 @@ class DeepSeekClient:
                  for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
         return {"model": self.model, "http_attempts": self.calls, "run_request_limit": self.max_requests,
                 "response_mode": self.response_mode,
+                "thinking": self.thinking,
+                "tool_choice": ("required" if self.thinking == "disabled" else "auto")
+                    if self.response_mode == "strict_tool" else None,
                 "api_path": transport.STRICT_API_PATH if self.response_mode == "strict_tool" else transport.API_PATH,
                 "format_failure_continuations": list(self.format_failure_continuations),
                 "max_tokens_per_request": self.max_tokens, "reasoning_effort": self.reasoning_effort,

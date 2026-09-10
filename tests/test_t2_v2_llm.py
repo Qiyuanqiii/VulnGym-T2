@@ -67,6 +67,44 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertFalse(client.can_continue_after_format_error)
 
+    def test_disabled_thinking_requires_strict_tool_and_omits_reasoning_effort(self):
+        sent = []
+        client = DeepSeekClient("dummy-not-a-real-key", self.ledger, run_id="synthetic",
+                                response_mode="strict_tool", thinking="disabled", reasoning_effort="max",
+                                send=lambda body, *_: sent.append(json.loads(body)) or tool_envelope())
+        self.assertEqual(client.complete([{"role": "user", "content": "test"}])["action"], "draft")
+        self.assertEqual(sent[0]["thinking"], {"type": "disabled"})
+        self.assertEqual(sent[0]["tool_choice"], "required")
+        self.assertNotIn("reasoning_effort", sent[0])
+        self.assertNotIn("response_format", sent[0])
+        self.assertEqual(len(sent[0]["tools"]), 1)
+        self.assertIs(sent[0]["tools"][0]["function"]["strict"], True)
+        summary = client.summary()
+        self.assertEqual(summary["thinking"], "disabled")
+        self.assertEqual(summary["tool_choice"], "required")
+        self.assertIsNone(summary["reasoning_effort"])
+        self.assertEqual(summary["api_path"], "/beta/chat/completions")
+        self.assertEqual((client.calls, self.ledger.started), (1, 1))
+
+    def test_disabled_thinking_still_rejects_plain_text_without_retry_or_fallback(self):
+        sent = []
+        client = DeepSeekClient("dummy-not-a-real-key", self.ledger, run_id="synthetic",
+                                response_mode="strict_tool", thinking="disabled",
+                                send=lambda *_: sent.append(True) or reply())
+        for _ in range(2):
+            with self.assertRaisesRegex(ProviderError, "deepseek_completion_incomplete"):
+                client.complete([{"role": "user", "content": "test"}])
+        self.assertEqual(len(sent), 1)
+        self.assertFalse(client.can_continue_after_format_error)
+
+    def test_invalid_thinking_or_disabled_json_is_rejected_before_send(self):
+        for thinking in (None, True, [], "auto", "Disabled"):
+            with self.subTest(thinking=thinking), self.assertRaisesRegex(ValueError, "provider_thinking_invalid"):
+                DeepSeekClient("dummy-not-a-real-key", self.ledger, run_id="synthetic", thinking=thinking)
+        with self.assertRaisesRegex(ValueError, "thinking_disabled_requires_strict_tool"):
+            DeepSeekClient("dummy-not-a-real-key", self.ledger, run_id="synthetic", thinking="disabled")
+        self.assertEqual(self.ledger.started, 0)
+
     def test_format_failure_is_only_resumed_explicitly_on_a_new_case_without_budget_reset(self):
         replies = iter([malformed_reply(), reply()])
         client = self.client(lambda *_: next(replies))
@@ -164,6 +202,13 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(c.complete([{"role": "user", "content": "test"}])["action"], "draft")
         self.assertEqual(c.summary()["usage"]["total_tokens"], 30)
         self.assertEqual(sent[0]["model"], MODEL)
+        self.assertEqual(sent[0]["thinking"], {"type": "enabled"})
+        self.assertEqual(sent[0]["reasoning_effort"], "high")
+        self.assertEqual(sent[0]["response_format"], {"type": "json_object"})
+        self.assertNotIn("tools", sent[0])
+        self.assertNotIn("tool_choice", sent[0])
+        self.assertEqual(c.summary()["thinking"], "enabled")
+        self.assertIsNone(c.summary()["tool_choice"])
         self.assertNotIn("dummy-not-a-real-key", self.path.read_text())
         c.close()
         self.assertEqual(c._key, "")

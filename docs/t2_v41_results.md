@@ -80,3 +80,52 @@ python -m vulngym_t2.review_export --run-dir examples/run-07 --output flash-redu
 5. 复核包和自评显示以上状态；旧记录缺声明时标明旧协议，而非替旧模型补写依据。离线 pending 也识别新终态，全部遍历完成时不会再提出重复输入。
 
 离线验证使用合成模型响应、合成仓库及独立临时账本，检查严格参数、失败隔离、全局停机、预算不重置、版本降级、自查失败保留和导出兼容。这些只能证明代码处理符合预期，不能填上真实效果一栏。下一步应使用仍有效且明确授权的凭据做少量定向实测，先检验严格输出协议，再检验实际字段判断；不默认复用已通知可撤销的旧 key。
+
+## 再次明确授权后的严格输出定向复测：阶段记录
+
+用户随后明确确认继续使用同一 key，并沿用同一份最多 500 次请求的授权与累计预算，没有另开额度。前文“不再复用”“尚未真实服务验证”是此前阶段截止时的记录；本节追加再次获准后的实际进展，不改写 run-01 至 run-07，也不将尚未完成的后续安排列为成功。
+
+### 协议短测成功，但不是任务提取结果
+
+累计生成请求 42 使用 `strict_tool`、`thinking=enabled`、`tool_choice=auto`，完成一次仅返回空 draft 的短协议检查：**1 次 HTTP、3,199 tokens、1.674 秒**。该请求没有产出漏洞任务结果，不计完整候选或独立样本。它只说明这一次短请求能够通过所测协议；不能证明同一配置在真实任务中稳定，更不能说明版本判断或源码字段已经正确。
+
+### run-08：真实任务在第一项停止
+
+运行名为 `targeted-run-01`，六份公开产物已原样归档到 `examples/run-08`。计数仍按请求输入 / 已处理 / 完整候选 / 草稿 / 未开始排列：
+
+| 随包目录 | 批次状态与结果 | 计数 | HTTP / 秒 | 已报告 tokens |
+|---|---|---|---|---|
+| `examples/run-08` | `provider_stopped`；第一项保留草稿，后三项未开始 | 4 / 1 / 0 / 1 / 3 | 2 / 7.456 | 26,763 |
+
+累计生成请求 44 记录 `deepseek_completion_incomplete`，触发全局停止；本批 `format_failure_count=0`，不是可隔离后继续批次的正文 JSON 格式错误。保存的诊断为 `finish_reason=stop`、`refusal_present=false`、`model_matches=true`。这不是额度用尽或安全拒绝；也没有 `finish_reason=length` 支持输出长度截断的解释。现有记录只支持说明响应未满足控制器的完成条件，不据此猜测供应商内部原因。原失败和草稿保留，不因前述短探针成功而改记为成功。
+
+### 显式关闭 thinking 后，仅接上未开始的三项
+
+依据官方 [API 参数](https://api-docs.deepseek.com/api/create-chat-completion/)和 [Tool Calls](https://api-docs.deepseek.com/guides/tool_calls/)：thinking 下不能强制 required，而 strict 支持非 thinking。增加 `--thinking disabled` 显式选项，仅与 strict_tool 配合：发送 `tool_choice=required`，省略 reasoning_effort。默认 enabled 仍保留 auto；不会故障后静默切换，也不接收普通正文作为备用答案。该更改改变了推理配置，不能把新旧结果当严格控制的模型对比。34项限定离线测试通过，不替代真实效果证据。
+
+累计生成请求45以 disabled/required 完成第二次空draft协议检查，1 HTTP、3,147tokens、1.631秒，同样不算任务结果。之后仅处理前批从未开始的 OpenClaw、减线索Flowise、减线索Langflow，材料及顺序未变，不重跑Open WebUI。相应四项原输入的可携带模板为 `examples/t2_v2_input/v41/strict-targeted-inputs.example.jsonl`，实际续批只取末三行；仓库路径需用户自行配置。
+
+| 随包目录 | 批次状态与结果 | 输入 / 已处理 / 完整 / 草稿 / 未开始 | HTTP / 秒 | 已报告 tokens |
+|---|---|---|---|---|---|
+| `examples/run-09` | `completed_with_errors`；OpenClaw完整、Flowise证据不足、Langflow技术失败 | 3 / 3 / 1 / 2 / 0 | 15 / 56.259 | 191,297 |
+
+三项分别使用4、6、5次模型调用，共29次只读工具调用；Flowise另有1次 `search_history failed: ValueError` 工具错误，后续继续。零未开始不等于零失败。最后一项累计请求60的原生函数参数仍非合法JSON：`Expecting ':' delimiter`，行1列3499，参数5799字符；`finish_reason=tool_calls`、模型匹配、无refusal，错误阶段为 `parse_completion_json`。这次严格schema并未消除语法失败；原始坏参数未保存，无法进一步定位供应商生成原因，未猜补或重试。
+
+该错误满足既有格式隔离条件，`format_failure_count=1`；但它是最后一项，`continued=false`，没有实际发生“错误后继续下一输入”。因此这批也不能当作错误隔离分支的真实继续成功证据。所有输入已遍历但含错，保留 `completed_with_errors` 及非零退出，终态不是全成功。
+
+### 逐条质量核对：完整候选也存在缺口
+
+以下是开发助手对保存的公开字段与源码片段的只读核对，不是独立人工签字，不改写模型JSON：
+
+- **OpenClaw：** 机器完整候选，15字段、verify=0、自查completed、无模型/工具错误。commit理由包含所选SHA实际源码与机制，但basis写 `affected_range_and_source`，同时理由承认受影响范围对应只来自公告、未检查本地版本表，不能称范围映射已确认。EP选了内部授权调用参数尾段567–577，理由承认外部handler声明未读、可达性为推断，却保持supported。**必需入口字段的实质依据仍有缺口；不能把这条机器完整候选当作交验已通过。**
+- **减线索Flowise：** 自查completed，但commit最终 `inspected_only/uncertain`，建议SHA保留，EP/CO/分类随版本未建立而留待复核。它不是自查失败，也不是一次完整提取。E0013–E0015保存相关机制，模型仍以没有fix/范围作不足理由，有过度弃答疑点；“唯一可解析ref”措辞也与E0007/E0008成功检查其他SHA不一致。自查总结称恢复EP/CO supported，不取代最终review中的uncertain状态。
+- **减线索Langflow：** 5次调用均在plan_and_read，未取得模型字段初稿，自查not_requested，而不是“自查失败”或“没有缺陷”。保留10个输入/默认字段、13条证据、10次工具读取，commit/EP/CO/分类missing。E0010–E0013保存源码窗口，E0013有截断标记；没有建立位置终检结果。
+- **前批Open WebUI：** 同样未取得模型字段初稿，自查not_requested。保留10个字段、9条证据、6次成功工具读取；公告E0002有截断标记。技术失败不能当作模型已完成判断后的保守弃答。
+
+所以这轮四个预定输入的真实结果是 **1个待语义复核的机器完整候选、1个证据不足草稿、2个技术失败草稿**。不是四条都完成提取，也不能与旧run的最好结果拼成新配置全成功。严格模式与版本声明修复只解决了一部分问题；主要剩余缺口是供应商结构输出稳定性、入口定义/可达性证据和过度弃答之间的校准。
+
+### 本轮收尾与账本
+
+本轮新增19 HTTP：2个纯协议检查、17个任务请求；新增已报告224,406tokens。原授权累计 **60个生成请求 + 1个目录查询 = 61/500**，已报告prompt591,190、completion65,681、总656,871tokens，仍另有此前1请求用量未知，费用未独立测量。没有重置账本、自动重试、换模型或追加独立样本；本轮调用已结束。
+
+run-01至run-07原样保留，新run-08/run-09各六个公开文件随包。没有把密钥、账本、原始响应、隐藏推理、本地仓库路径或目标Git对象搬进交付包。两次协议检查的脱敏统计见本节，不作为额外样例目录。代码、CLI、自评、复核导出和当前说明一并更新；设计PDF仍是旧快照。下一步优先缩短/简化结构输出并补入口证据判断，而不是反复付费重跑这四题直到全绿。

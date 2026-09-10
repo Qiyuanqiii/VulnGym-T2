@@ -44,11 +44,13 @@ class CliTests(unittest.TestCase):
 
     def test_strict_response_and_legacy_stop_switch_are_explicit(self):
         options = parser().parse_args(["--advisory", "synthetic.txt", "--response-mode", "strict_tool",
-                                       "--stop-on-format-error"])
+                                       "--thinking", "disabled", "--stop-on-format-error"])
         self.assertEqual(options.response_mode, "strict_tool")
+        self.assertEqual(options.thinking, "disabled")
         self.assertTrue(options.stop_on_format_error)
         defaults = parser().parse_args(["--advisory", "synthetic.txt"])
         self.assertEqual(defaults.response_mode, "json")
+        self.assertEqual(defaults.thinking, "enabled")
         self.assertFalse(defaults.stop_on_format_error)
 
     def test_exact_model_is_forwarded_to_ledger_and_client(self):
@@ -60,13 +62,23 @@ class CliTests(unittest.TestCase):
                  patch("vulngym_t2.cli._emit"), patch("vulngym_t2.cli.sys.stdin", io.StringIO("dummy-not-a-real-key\n")):
                 code = main(["--advisory", "synthetic.txt", "--output", str(Path(temp) / "out"),
                              "--request-ledger", str(Path(temp) / "requests.jsonl"), "--key-stdin", "--model", selected,
-                             "--response-mode", "strict_tool"])
+                             "--response-mode", "strict_tool", "--thinking", "disabled"])
                 self.assertEqual(code, 0)
                 self.assertEqual(ledger.call_args.kwargs["model"], selected)
                 self.assertEqual(client.call_args.kwargs["model"], selected)
                 self.assertEqual(client.call_args.kwargs["response_mode"], "strict_tool")
+                self.assertEqual(client.call_args.kwargs["thinking"], "disabled")
                 ledger.return_value.close.assert_called_once()
                 client.return_value.close.assert_called_once()
+
+    def test_disabled_thinking_with_json_is_rejected_before_input_or_key_access(self):
+        with patch("vulngym_t2.cli.load_jobs") as load, patch("vulngym_t2.cli.os.environ.get", return_value="") as env_get, \
+             patch("vulngym_t2.cli.getpass.getpass") as prompt, patch("vulngym_t2.cli._emit") as emit:
+            self.assertEqual(main(["--advisory", "synthetic.txt", "--thinking", "disabled"]), 2)
+        self.assertEqual(emit.call_args.args[0]["code"], "thinking_disabled_requires_strict_tool")
+        load.assert_not_called()
+        self.assertNotIn("DEEPSEEK_API_KEY", [call.args[0] for call in env_get.call_args_list])
+        prompt.assert_not_called()
 
     def test_pipeline_output_connection_retains_bad_input(self):
         with tempfile.TemporaryDirectory(prefix="t2-cli-") as temp:

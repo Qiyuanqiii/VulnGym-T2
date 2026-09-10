@@ -1,0 +1,9 @@
+{"action": {"action": "tool", "automatic": true, "evidence_ref": "E0004", "success": true, "tool": "inspect_commit"}, "entry_id": "entry-16602", "report_id": "GHSA-CM35-V4VP-5XVX"}
+{"action": {"action": "tool", "automatic": true, "evidence_ref": "E0005", "success": true, "tool": "read_diff"}, "entry_id": "entry-16602", "report_id": "GHSA-CM35-V4VP-5XVX"}
+{"action": {"action": "model_call", "call": 1, "stage": "plan_and_read"}, "entry_id": "entry-16602", "report_id": "GHSA-CM35-V4VP-5XVX"}
+{"action": {"action": "plan", "plan": "Read the parent revision's middleware diff site, locate the frontend SSE handler, and confirm the parent SHA's identity.", "requested_calls": 4}, "entry_id": "entry-16602", "report_id": "GHSA-CM35-V4VP-5XVX"}
+{"action": {"action": "tool", "automatic": false, "evidence_ref": "E0006", "success": true, "tool": "read_file"}, "entry_id": "entry-16602", "report_id": "GHSA-CM35-V4VP-5XVX"}
+{"action": {"action": "tool", "automatic": false, "evidence_ref": "E0007", "success": true, "tool": "inspect_commit"}, "entry_id": "entry-16602", "report_id": "GHSA-CM35-V4VP-5XVX"}
+{"action": {"action": "tool", "automatic": false, "evidence_ref": "E0008", "success": true, "tool": "search_code"}, "entry_id": "entry-16602", "report_id": "GHSA-CM35-V4VP-5XVX"}
+{"action": {"action": "tool", "automatic": false, "evidence_ref": "E0009", "success": true, "tool": "search_code"}, "entry_id": "entry-16602", "report_id": "GHSA-CM35-V4VP-5XVX"}
+{"action": {"action": "model_call", "call": 2, "stage": "plan_and_read"}, "entry_id": "entry-16602", "report_id": "GHSA-CM35-V4VP-5XVX"}
