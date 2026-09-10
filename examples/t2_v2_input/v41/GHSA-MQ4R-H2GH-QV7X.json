@@ -1,0 +1,16 @@
+{
+  "ghsa_id": "GHSA-MQ4R-H2GH-QV7X",
+  "summary": "Flowise Allows Mass Assignment in `/api/v1/leads` Endpoint",
+  "identifiers": [
+    {
+      "type": "CVE",
+      "value": "CVE-2026-30822"
+    },
+    {
+      "type": "GHSA",
+      "value": "GHSA-MQ4R-H2GH-QV7X"
+    }
+  ],
+  "source_link": "https://github.com/advisories/GHSA-mq4r-h2gh-qv7x",
+  "description": "Reduced-input diagnostic: only the original advisory summary and identifiers are supplied. Full description, fix links and source excerpts were deliberately withheld. This is not a new unseen advisory."
+}

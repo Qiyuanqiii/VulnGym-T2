@@ -31,6 +31,13 @@ _MAX_STRING_CHARS = 262_144
 _MAX_CANONICAL_BYTES = 1_048_576
 
 
+def validate_model_id(model: str) -> str:
+    """Accept an exact bounded provider ID, without aliases or discovery."""
+    if not isinstance(model, str) or not re.fullmatch(r"deepseek-[a-z0-9][a-z0-9.-]{0,119}", model):
+        raise ValueError("provider_model_invalid")
+    return model
+
+
 class TransportError(RuntimeError):
     """Only a bounded machine-readable code crosses the client boundary."""
 
@@ -329,11 +336,12 @@ def _truncation_metadata(envelope: dict[str, Any], choice: dict[str, Any], size:
             "currency_cost_measured": False}
 
 
-def parse_chat_response(raw: bytes) -> dict[str, Any]:
+def parse_chat_response(raw: bytes, *, expected_model: str = MODEL_ID) -> dict[str, Any]:
+    expected_model = validate_model_id(expected_model)
     envelope = _strict_object(raw)
     if envelope.get("object") != "chat.completion":
         raise TransportError("deepseek_response_invalid")
-    if envelope.get("model") != MODEL_ID:
+    if envelope.get("model") != expected_model:
         raise TransportError("deepseek_response_model_mismatch")
     choices = envelope.get("choices")
     if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):

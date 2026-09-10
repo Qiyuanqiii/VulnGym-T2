@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from vulngym_t2.cli import main, run_batch
+from vulngym_t2.cli import main, parser, run_batch
+from vulngym_t2.llm import MODEL
 from tests.test_t2_v2_pipeline import StubRepo, job, choose_source, source_draft, retain_review
 
 
@@ -33,6 +34,29 @@ class Client:
 
 
 class CliTests(unittest.TestCase):
+    def test_exact_model_argument_preserves_default_and_rejects_invalid_ids(self):
+        self.assertEqual(parser().parse_args(["--advisory", "synthetic.txt"]).model, MODEL)
+        self.assertEqual(parser().parse_args(["--advisory", "synthetic.txt", "--model", "deepseek-flash"]).model,
+                         "deepseek-flash")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            parser().parse_args(["--advisory", "synthetic.txt", "--model", "https://elsewhere.invalid"])
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_exact_model_is_forwarded_to_ledger_and_client(self):
+        selected = "deepseek-flash"
+        with tempfile.TemporaryDirectory(prefix="t2-cli-") as temp:
+            with patch("vulngym_t2.cli.load_jobs", return_value=[job()]), patch("vulngym_t2.cli.RepoReader", return_value=Repo()), \
+                 patch("vulngym_t2.cli.RequestLedger") as ledger, patch("vulngym_t2.cli.DeepSeekClient") as client, \
+                 patch("vulngym_t2.cli.run_batch", return_value=({"status": "synthetic"}, 0)), \
+                 patch("vulngym_t2.cli._emit"), patch("vulngym_t2.cli.sys.stdin", io.StringIO("dummy-not-a-real-key\n")):
+                code = main(["--advisory", "synthetic.txt", "--output", str(Path(temp) / "out"),
+                             "--request-ledger", str(Path(temp) / "requests.jsonl"), "--key-stdin", "--model", selected])
+                self.assertEqual(code, 0)
+                self.assertEqual(ledger.call_args.kwargs["model"], selected)
+                self.assertEqual(client.call_args.kwargs["model"], selected)
+                ledger.return_value.close.assert_called_once()
+                client.return_value.close.assert_called_once()
+
     def test_pipeline_output_connection_retains_bad_input(self):
         with tempfile.TemporaryDirectory(prefix="t2-cli-") as temp:
             output = Path(temp) / "out"

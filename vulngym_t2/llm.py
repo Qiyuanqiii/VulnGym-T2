@@ -30,9 +30,10 @@ def _wire(value: Any) -> bytes:
 class RequestLedger:
     """One exclusive writer across all runs using this temporary authorization."""
 
-    def __init__(self, path: Path, *, limit: int = MAX_AUTHORIZED_REQUESTS):
+    def __init__(self, path: Path, *, limit: int = MAX_AUTHORIZED_REQUESTS, model: str = MODEL):
         if type(limit) is not int or not 1 <= limit <= MAX_AUTHORIZED_REQUESTS:
             raise ValueError("request_limit_invalid")
+        self.model = transport.validate_model_id(model)
         self.path = Path(path)
         if not self.path.is_absolute() or not self.path.parent.is_dir():
             raise ValueError("ledger_requires_existing_absolute_parent")
@@ -60,14 +61,14 @@ class RequestLedger:
     def _read_existing(self):
         if not self.path.exists():
             self._append({"event": "authorization", "request_limit": self.limit,
-                          "model": MODEL, "automatic_retries": 0})
+                          "model": self.model, "automatic_retries": 0})
             return
         if self.path.stat().st_size > 2_000_000:
             raise ValueError("ledger_too_large")
         lines = self.path.read_text(encoding="utf-8").splitlines()
         rows = [json.loads(line) for line in lines]
         if not rows or rows[0] != {"event": "authorization", "request_limit": self.limit,
-                                  "model": MODEL, "automatic_retries": 0}:
+                                  "model": self.model, "automatic_retries": 0}:
             raise ValueError("ledger_authorization_mismatch")
         starts, finishes = set(), set()
         for row in rows[1:]:
@@ -120,7 +121,8 @@ class RequestLedger:
         self._count_usage(usage)
 
     def summary(self):
-        return {"authorization_limit": self.limit, "authorization_http_attempts": self.started,
+        return {"authorization_model": self.model,
+                "authorization_limit": self.limit, "authorization_http_attempts": self.started,
                 "authorization_usage": dict(self.usage), "unknown_usage_attempts": self.usage_unknown,
                 "currency_cost_measured": False}
 
@@ -131,7 +133,8 @@ class RequestLedger:
 class DeepSeekClient:
     def __init__(self, api_key: str, ledger: RequestLedger, *, run_id: str,
                  max_requests: int = 80, max_tokens: int = 8192,
-                 reasoning_effort: str = "high", timeout: float = 300, send=None, progress=None):
+                 reasoning_effort: str = "high", timeout: float = 300, send=None, progress=None,
+                 model: str = MODEL):
         if not isinstance(api_key, str) or not api_key or not all(33 <= ord(c) <= 126 for c in api_key):
             raise ValueError("api_key_missing_or_invalid")
         if type(max_requests) is not int or not 1 <= max_requests <= MAX_AUTHORIZED_REQUESTS:
@@ -140,6 +143,9 @@ class DeepSeekClient:
             raise ValueError("output_token_limit_invalid")
         if reasoning_effort not in {"low", "high", "max"} or not 1 <= timeout <= 300:
             raise ValueError("provider_settings_invalid")
+        self.model = transport.validate_model_id(model)
+        if self.model != ledger.model:
+            raise ValueError("ledger_authorization_mismatch")
         self._key, self.ledger, self.run_id = api_key, ledger, run_id
         self.max_requests, self.max_tokens = max_requests, max_tokens
         self.reasoning_effort, self.timeout = reasoning_effort, timeout
@@ -165,7 +171,7 @@ class DeepSeekClient:
             raise ProviderError(self.halted)
         if not isinstance(messages, list) or not messages:
             raise ValueError("messages_required")
-        body = _wire({"model": MODEL, "messages": messages,
+        body = _wire({"model": self.model, "messages": messages,
                       "thinking": {"type": "enabled"}, "reasoning_effort": self.reasoning_effort,
                       "response_format": {"type": "json_object"},
                       "max_tokens": self.max_tokens, "stream": False})
@@ -196,13 +202,13 @@ class DeepSeekClient:
                                    "non_whitespace_content_characters": len(content.strip()) if isinstance(content, str) else None,
                                    "refusal_present": bool(message.get("refusal")),
                                    "finish_reason": finish if finish in {"stop", "length", "tool_calls", "content_filter", "insufficient_system_resource"} else "other",
-                                   "model_matches": envelope.get("model") == MODEL}
+                                   "model_matches": envelope.get("model") == self.model}
             reported = envelope.get("usage", {})
             if isinstance(reported, dict):
                 keys = ("prompt_tokens", "completion_tokens", "total_tokens")
                 if all(type(reported.get(key)) is int and 0 <= reported[key] <= 1_000_000_000 for key in keys):
                     usage = {key: reported[key] for key in keys}
-            result = dict(transport.parse_chat_response(raw))
+            result = dict(transport.parse_chat_response(raw, expected_model=self.model))
         except Exception as exc:
             code = getattr(exc, "error_code", None)
             if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,95}", code):
@@ -236,7 +242,7 @@ class DeepSeekClient:
     def summary(self):
         usage = {key: sum((row.get("usage") or {}).get(key, 0) for row in self.events)
                  for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
-        return {"model": MODEL, "http_attempts": self.calls, "run_request_limit": self.max_requests,
+        return {"model": self.model, "http_attempts": self.calls, "run_request_limit": self.max_requests,
                 "max_tokens_per_request": self.max_tokens, "reasoning_effort": self.reasoning_effort,
                 "timeout_seconds": self.timeout, "automatic_retries": 0,
                 "usage": usage, "halted": self.halted, **self.ledger.summary()}

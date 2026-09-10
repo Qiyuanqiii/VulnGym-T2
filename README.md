@@ -6,18 +6,20 @@
 
 这是独立重建入口 `python -m vulngym_t2`，不经过旧 sealed/orchestrator 流程。输入公告材料和已经准备好的本地 Git 仓库，由模型读取历史与真实源码、提出字段，并在预算允许且形成草稿后最多进行一次自查。不要求用户提供 `source_paths`、候选代码编号或内部任务 ID。
 
-状态：隔离实现已完成代表性真实开发运行。最近一次 GHSA URL 列表批次处理 3 份输入，导出 3 条完整候选，耗时 525.471 秒、18 次 HTTP；另一次批次因首条模型空白正文停止，失败和草稿也保留。**这不是盲测、总体准确率或导师验收通过的声明。** 逐项结果与质量边界见 `docs/t2_v2_results.md`；交付包同时包含真实结果、自评和失败示例。
+状态：已用 `--model deepseek-flash`（2026-09-10 官方 V4.1 Flash）完成新的真实开发运行。完整材料四份得到 Langflow、Flowise 两条完整候选，Open WebUI、OpenClaw 两份无效 JSON 失败草稿；另做减线索两份，Flowise 完整，Langflow 因读取响应正文的传输失败保留不确定草稿。停止记录不是拒绝或权限失败；后续批次只处理尚未开始项，没有自动重试。两套实验重叠使用既有四个案例，独立新样本为 0。**核心仍未达到广泛效果验收；这些不是盲测、总体准确率或导师验收通过的声明。** 最新用量、结果与剩余问题见 [V4.1 实跑记录](docs/t2_v41_results.md)，历史开发结果见 [v2 结果与自评](docs/t2_v2_results.md)；旧 3/3 不代表最新结果。
+
+本次同一授权账本累计 41 次模型请求，另有 1 次模型目录查询，共 42/500 次；已报告用量 432,465 tokens，另有 1 次传输失败请求的用量未知，不能称为精确总 token。运行已停止使用临时 key，可撤销；密钥不在交付材料中。
 
 ## 不用 key，先看真实结果
 
 在项目根目录运行以下命令，将已有真实结果整理成便于评审阅读的 Markdown。输出必须是尚不存在的新文件，且不能放进原运行目录；不会读取目标仓库、联网或修改原 JSONL。
 
 ```powershell
-python -m vulngym_t2.review_export --run-dir examples/run-03 --output review-complete.md
-python -m vulngym_t2.review_export --run-dir examples/run-02 --output review-failure.md
+python -m vulngym_t2.review_export --run-dir examples/run-04 --output review-v41-mixed.md
+python -m vulngym_t2.review_export --run-dir examples/run-05 --output review-v41-failure.md
 ```
 
-打开生成的文件即可看批次统计、逐条字段、模型判断、引用目录和空白人工复核栏。`complete` 仍是自动完整候选，`verify=0` 不变；导出不是新的模型运行或人工批准。来源内容作文本显示，不是要执行的命令。最新[案例勘误](docs/t2_case_notes.md)已记录一处修复/父提交角色文字错误及描述超出所引证据的情况；读旧样例时应同时查看，不能只展示成功数量。
+打开生成的文件即可看批次统计、逐条字段、模型判断、引用目录和空白人工复核栏。`complete` 仍是自动完整候选，`verify=0` 不变；导出不是新的模型运行或人工批准。来源内容作文本显示，不是要执行的命令。[旧案例勘误](docs/t2_case_notes.md)记录了旧运行中的修复/父提交角色文字错误及描述超出所引证据的情况；新一轮是否改进见 [V4.1 实跑记录](docs/t2_v41_results.md)，不能只展示成功数量。
 
 ## 运行前
 
@@ -58,8 +60,16 @@ python -m vulngym_t2 --advisory D:\T2\materials\advisory.md --repo D:\T2\repos\p
 确认材料与授权后运行：
 
 ```powershell
-python -m vulngym_t2 --advisory D:\T2\materials\advisory.md --repo D:\T2\repos\project --source-link https://github.com/advisories/GHSA-2222-3333-4444 --output D:\T2\runs\single-001 --request-ledger D:\T2\budget\temporary-authorization.jsonl --max-requests 24
+python -m vulngym_t2 --advisory D:\T2\materials\advisory.md --repo D:\T2\repos\project --source-link https://github.com/advisories/GHSA-2222-3333-4444 --output D:\T2\runs\single-001 --request-ledger D:\T2\budget\temporary-authorization.jsonl --model deepseek-flash --max-requests 24
 ```
+
+### 选择模型
+
+`--model` 接收准确的 DeepSeek API 标识。2026-09-10 [官方更新说明](https://api-docs.deepseek.com/updates/#date-2026-09-10)将 V4.1 Flash 对应为 `deepseek-flash`；本次账号的 `/models` 也返回该标识。不要猜写 `v4.1flash` 或把名称相近的模型当成已授权模型。
+
+为兼容旧脚本，省略参数时仍使用旧默认 `deepseek-v4-pro`；本次 V4.1 运行必须显式传 `--model deepseek-flash`。请求、响应名称校验、用量摘要与账本头绑定同一模型，不静默降级或改别名。供应商可能更新服务端别名所指版本，运行报告应同时记录日期、API 标识和当时官方版本说明，不靠客户端字符串声称永远锁定权重。
+
+同一授权继续运行时复用同一账本。不同模型与旧账本不匹配会在请求前失败；不要通过另建账本重置已消费次数。若本轮还进行了模型目录查询，应从总授权中扣除其次数，例如总 500 次且目录查询已用 1 次，模型账本上限设为 499。`--max-requests` 仍只是单批额外上限，不是必须用完的配额。
 
 密钥优先从已配置的 `DEEPSEEK_API_KEY` 环境变量读取；若未配置，在交互式终端直接运行上面的正式命令，会出现 `Temporary DeepSeek key (hidden):`，此时输入临时授权密钥，字符不回显。不要为了设置环境变量而把真实密钥写进一条可进入 Shell 历史的赋值命令，也不要放进参数、脚本或文档。若已有环境配置，先确认它属于本次授权，不要打印其内容。
 
@@ -75,7 +85,7 @@ python -m vulngym_t2 --advisory D:\T2\materials\advisory.md --repo D:\T2\repos\p
 
 ```powershell
 python -m vulngym_t2 --input D:\T2\materials\reports.jsonl --prepare-only
-python -m vulngym_t2 --input D:\T2\materials\reports.jsonl --output D:\T2\runs\jsonl-001 --request-ledger D:\T2\budget\temporary-authorization.jsonl --max-requests 80
+python -m vulngym_t2 --input D:\T2\materials\reports.jsonl --output D:\T2\runs\jsonl-001 --request-ledger D:\T2\budget\temporary-authorization.jsonl --model deepseek-flash --max-requests 80
 ```
 
 同仓库批次可用 `--repo` 指定默认仓库；该命令行路径相对于当前工作目录，而非 JSONL 目录。`repo_url` 可省略并从本地 GitHub `origin` 推导；若没有可用的 GitHub origin，就在 JSONL 或 repo-map 中明确提供真实 `repo_url`，否则可能保留为不完整草稿。不要编造 GitHub 仓库 URL。
@@ -105,7 +115,7 @@ https://github.com/advisories/GHSA-2222-3333-4444
 
 ```powershell
 python -m vulngym_t2 --input D:\T2\materials\urls.txt --cache-dir D:\T2\cache --repo-map D:\T2\materials\repo-map.json --prepare-only
-python -m vulngym_t2 --input D:\T2\materials\urls.txt --cache-dir D:\T2\cache --repo-map D:\T2\materials\repo-map.json --output D:\T2\runs\batch-001 --request-ledger D:\T2\budget\temporary-authorization.jsonl --max-requests 80
+python -m vulngym_t2 --input D:\T2\materials\urls.txt --cache-dir D:\T2\cache --repo-map D:\T2\materials\repo-map.json --output D:\T2\runs\batch-001 --request-ledger D:\T2\budget\temporary-authorization.jsonl --model deepseek-flash --max-requests 80
 ```
 
 repo-map 中的相对路径以映射文件所在目录为基准。上面三种输入路线任选一种即可，不需要同时准备 JSONL、URL 列表和材料目录。
@@ -146,9 +156,9 @@ python -m vulngym_t2.report --run-dir D:\T2\runs\single-001
 
 同一临时授权的所有运行必须复用同一个 `--request-ledger`，且不能并发占用它。`--authorization-limit` 默认且最多为 **500 次累计 HTTP 尝试**，已有账本须继续使用创建时相同的授权上限；失败尝试也计数。`--max-requests` 是本次运行上限，默认 80，不是必须花完的配额。不得另建或清空账本重置授权；锁定、损坏或发现未结束请求时保留现场并检查。
 
-默认每份公告最多 8 次模型调用、24 次仓库读调用，可用 `--max-calls-per-report` 和 `--max-tool-calls` 调低；硬上限分别为 16/64。模型调用次数和实际 HTTP 次数不是同一口径，以账本的 `http_started` 为授权用量准绳。当前实现固定使用传输模块配置的 `deepseek-v4-pro`，零自动重试，不自动换账户或模型；未测量货币费用，不能把 token 数当成实际账单。
+默认每份公告最多 8 次模型调用、24 次仓库读调用，可用 `--max-calls-per-report` 和 `--max-tool-calls` 调低；硬上限分别为 16/64。模型调用次数和实际 HTTP 次数不是同一口径，以账本的 `http_started` 为授权用量准绳。模型由显式 `--model` 选择；旧默认仍为 `deepseek-v4-pro`，本次新运行明确使用 `deepseek-flash`。零自动重试，不自动换账户或模型；未测量货币费用，不能把 token 数当成实际账单。
 
-模型可请求七种有界只读工具：`inspect_commit`、`list_files`、`read_file`、`search_code`、`read_diff`，以及探索已有本地版本的 `list_refs` / `search_history`。修复父提交、tag、HEAD 或提交说明命中只是待检线索，不自动成为漏洞版本；历史查询无命中也不证明不存在。源码精确一致不证明入口可达、攻击者可控或漏洞可利用；长材料截断、多入口、复杂跨文件逻辑和历史缺失仍需人工判断。当前每个输入最多产出一个条目；T1 集成和非空 trace 属可选扩展。新增历史探索已有离线功能检查，尚未进行新的真实模型评估。
+模型可请求七种有界只读工具：`inspect_commit`、`list_files`、`read_file`、`search_code`、`read_diff`，以及探索已有本地版本的 `list_refs` / `search_history`。修复父提交、tag、HEAD 或提交说明命中只是待检线索，不自动成为漏洞版本；历史查询无命中也不证明不存在。源码精确一致不证明入口可达、攻击者可控或漏洞可利用；长材料截断、多入口、复杂跨文件逻辑和历史缺失仍需人工判断。当前每个输入最多产出一个条目；T1 集成和非空 trace 属可选扩展。新增工具接入后的实现已参加本次 V4.1 开发运行，减线索 Langflow 的保存记录中有 1 次 `list_refs` 和 2 次 `search_history` 调用；该条仍因传输失败保留为草稿，不能把工具成功调用当成端到端成功，也不构成广泛提取效果评估。
 
 历史搜索默认从 HEAD 开始；若提供的对象仓库没有有效 HEAD，模型应先用 `list_refs`，再显式指定返回的 commit。程序不会静默挑选“漏洞版本”。
 
@@ -162,6 +172,6 @@ python -m vulngym_t2.pending --input examples/t2_v2_input/urls.txt --run-dir exa
 
 只支持不重复的 GHSA URL 列表，以及可核对的 `completed` / `provider_stopped` 运行。中断状态、计数/身份不符或已有输出文件会拒绝，不猜测哪一项曾发出请求；不保证源材料未变，也不恢复模型 checkpoint。若后来又分批运行过这些 URL，使用者还需核对后续记录，不能把单个旧运行的剩余清单当成全局待办。真正处理剩余输入需要明确授权和有效 key，并使用新输出目录、同一授权原有账本。
 
-可携带公开输入见 `examples/t2_v2_input/`，需按其说明配置自己的本地仓库路径。交付包的 `examples/run-01`、`run-02`、`run-03` 分别保留混合结果、停止结果、最新 URL 列表结果，不能把它们相加当成独立案例数。
+可携带公开输入见 `examples/t2_v2_input/`，需按其说明配置自己的本地仓库路径。`examples/run-01`、`run-02`、`run-03` 原样保留历史混合结果、历史停止结果和旧 URL 列表结果；本次 V4.1 完整材料首批及仅未开始项续批分别见 `examples/run-04`、`run-05`，减线索首批及仅未开始项续批分别见 `examples/run-06`、`run-07`。逐项说明见 [V4.1 实跑记录](docs/t2_v41_results.md)。这些批次含重复案例，不能相加当成独立样本数。
 
 短设计见 `docs/t2_v2_design.md`，交付 ZIP 另含三页 `docs/T2-design.pdf`；现场操作和人工复核见 `docs/t2_v2_demo.md`，支持现场演示，并不表示已经录制视频。官方字段定义以 `SCHEMA.md` 为准。

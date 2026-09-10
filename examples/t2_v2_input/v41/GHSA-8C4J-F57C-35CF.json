@@ -1,0 +1,16 @@
+{
+  "ghsa_id": "GHSA-8C4J-F57C-35CF",
+  "summary": "Langflow: Authenticated Users Can Read, Modify, and Delete Any Flow via Missing Ownership Check",
+  "identifiers": [
+    {
+      "type": "CVE",
+      "value": "CVE-2026-34046"
+    },
+    {
+      "type": "GHSA",
+      "value": "GHSA-8C4J-F57C-35CF"
+    }
+  ],
+  "source_link": "https://github.com/advisories/GHSA-8c4j-f57c-35cf",
+  "description": "Reduced-input diagnostic: only the original advisory summary and identifiers are supplied. Full description, fix links and source excerpts were deliberately withheld. This is not a new unseen advisory."
+}

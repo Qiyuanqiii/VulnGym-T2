@@ -1,0 +1,7 @@
+{"action": {"action": "tool", "automatic": true, "evidence_ref": "E0004", "success": true, "tool": "inspect_commit"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "tool", "automatic": true, "evidence_ref": "E0005", "success": true, "tool": "read_diff"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "model_call", "call": 1, "stage": "plan_and_read"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "plan", "plan": "List refs to find available commits, and read the vulnerable helper source at the fix parent to see what policy gates existed before the patch.", "requested_calls": 2}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "tool", "automatic": false, "evidence_ref": "E0006", "success": true, "tool": "list_refs"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "tool", "automatic": false, "evidence_ref": "E0007", "success": true, "tool": "read_file"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "model_call", "call": 2, "stage": "plan_and_read"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}

@@ -12,10 +12,11 @@ import time
 from datetime import datetime, timezone
 
 from .intake import load_jobs
-from .llm import DeepSeekClient, RequestLedger
+from .llm import DeepSeekClient, MODEL, RequestLedger
 from .output import BatchWriter, finalize_result
 from .pipeline import produce
 from .repository import RepoReader
+from .transport import validate_model_id
 
 
 def _code(exc: Exception, fallback: str) -> str:
@@ -53,6 +54,8 @@ def parser():
     p.add_argument("--max-calls-per-report", type=_positive(16), default=8)
     p.add_argument("--max-tool-calls", type=_positive(64), default=24)
     p.add_argument("--max-tokens", type=_positive(32768), default=8192)
+    p.add_argument("--model", type=validate_model_id, default=MODEL,
+                   help="exact authorized DeepSeek model ID; no alias substitution or automatic fallback")
     p.add_argument("--reasoning-effort", choices=("low", "high", "max"), default="high")
     p.add_argument("--timeout", type=_positive(300), default=300)
     p.add_argument("--key-stdin", action="store_true", help="read one key line from a pipe (never a terminal); otherwise env or hidden prompt")
@@ -151,10 +154,10 @@ def main(argv=None):
                 secret = getpass.getpass("Temporary DeepSeek key (hidden): ")
         if not secret:
             raise ValueError("api_key_missing")
-        ledger = RequestLedger(args.request_ledger.resolve(), limit=args.authorization_limit)
+        ledger = RequestLedger(args.request_ledger.resolve(), limit=args.authorization_limit, model=args.model)
         client = DeepSeekClient(secret, ledger, run_id=datetime.now(timezone.utc).strftime("t2-%Y%m%dT%H%M%S-%f"),
                                 max_requests=args.max_requests, max_tokens=args.max_tokens,
-                                reasoning_effort=args.reasoning_effort, timeout=args.timeout,
+                                reasoning_effort=args.reasoning_effort, timeout=args.timeout, model=args.model,
                                 progress=lambda event: _emit(event, sys.stderr))
         secret = ""
         summary, code = run_batch(jobs, readers, client, args.output, max_calls=args.max_calls_per_report,

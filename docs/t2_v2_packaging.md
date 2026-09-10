@@ -145,12 +145,14 @@ python -E -s -B -m vulngym_t2 --help
 `DELIVERY.json` 标识本产品，因此可在解压目录再次运行同一打包脚本。缺少产品 README
 和交付标识的普通旧工程不会被静默当作本产品打包。
 
-随包公开输入目录采用七个文件的显式清单：四份 `cache/GHSA-....json`、`urls.txt`、
+原公开输入目录采用七个文件的显式清单：四份 `cache/GHSA-....json`、`urls.txt`、
 `repo-map.example.json` 和该目录的 `README.md`。JP4J、8C4J、MQ4R、CM35 四份均为
 公开开发样本，公告 JSON 和 URL 列表保留原文，不含预测答案或另行预选的源码位置。
 映射仅使用 `repos/...` 相对占位路径；接收者须修改成本机仓库路径，或准备对应目录。
 相对路径以映射文件为基准，详细离线预检查命令见该目录 README。打包脚本不会递归
 收集 runtime、实际 repo-map、目标仓库、密钥、账本或未选择的运行输出。
+
+V4.1 迭代另显式加入四个 `v41/` 输入文件：完整批次 URL 顺序、两份减线索公告、使用相对仓库占位路径的 JSONL。新公开结果按顺序追加为 `run-04` 至 `run-07`，分别为完整材料首批、首批未开始项、减线索首批、减线索未开始项。含失败和自查未完成的草稿，不筛掉错误；详见 `docs/t2_v41_results.md`。当前七示例交付含 96 个文件，运行源码仍为 17 个。
 
 接收者自行提供已经准备好的本地 Git 仓库和公开公告；包不包含目标仓库、Git 对象、
 私有基准或答案数据。以 `D:\materials\advisory.md` 和 `D:\repos\project` 为例：
@@ -177,7 +179,7 @@ python -E -s -B -m vulngym_t2 --advisory D:\materials\advisory.md --repo D:\repo
 `review.jsonl`、`actions.jsonl`、`summary.json` 和可选 `assessment.md`，拒绝明显仍在运行
 或最终计数不完整的目录；完成但含错误/草稿的运行会如实保留其状态。文件名白名单与
 完成标记不是数据公开性证明，发布者还须确认这些文件已经完成脱敏与公开授权检查。
-最终交付包选择已经结束的 development-run-04、url-batch-run-05、url-batch-run-06，
+首次交付包选择已经结束的 development-run-04、url-batch-run-05、url-batch-run-06，
 依次放入 `examples/run-01`、`run-02`、`run-03`。失败和未处理数量不隐藏；详细统计见
 `docs/t2_v2_results.md`。附带三页设计 PDF 时使用 `--design-pdf` 指定已渲染文件：
 

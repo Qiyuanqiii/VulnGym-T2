@@ -1,0 +1,53 @@
+{
+  "candidate_count": 2,
+  "candidate_definition": "Complete schema entries only; drafts and input failures are excluded.",
+  "draft_count": 1,
+  "elapsed_seconds": 150.486,
+  "entry_count": 2,
+  "files": [
+    "entries.jsonl",
+    "reports.jsonl",
+    "review.jsonl",
+    "actions.jsonl",
+    "summary.json"
+  ],
+  "human_verified_count": 0,
+  "input_count": 3,
+  "input_failure_count": 0,
+  "jobs_with_model_errors": 2,
+  "model_calls": 18,
+  "model_error_count": 4,
+  "pipeline_error_count": 4,
+  "provider": {
+    "authorization_http_attempts": 18,
+    "authorization_limit": 499,
+    "authorization_model": "deepseek-flash",
+    "authorization_usage": {
+      "completion_tokens": 30273,
+      "prompt_tokens": 209406,
+      "total_tokens": 239679
+    },
+    "automatic_retries": 0,
+    "currency_cost_measured": false,
+    "halted": "deepseek_response_invalid_json",
+    "http_attempts": 18,
+    "max_tokens_per_request": 16384,
+    "model": "deepseek-flash",
+    "reasoning_effort": "high",
+    "run_request_limit": 40,
+    "timeout_seconds": 300,
+    "unknown_usage_attempts": 0,
+    "usage": {
+      "completion_tokens": 30273,
+      "prompt_tokens": 209406,
+      "total_tokens": 239679
+    }
+  },
+  "report_count": 2,
+  "requested_input_count": 4,
+  "schema_entry_count": 2,
+  "status": "provider_stopped",
+  "tool_calls": 30,
+  "tool_error_count": 0,
+  "unprocessed_input_count": 1
+}

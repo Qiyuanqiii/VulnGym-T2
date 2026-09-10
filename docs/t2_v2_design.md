@@ -14,7 +14,7 @@
 |---|---|
 | 输入与入口（5） | `__init__`、`__main__`、`cli`、`intake`、`pending`：参数、材料、批次调度与离线未开始清单。 |
 | 分析与产物（5） | `repository`、`pipeline`、`output`、`report`、`review_export`：读源码、模型循环、终检、离线自评与复核阅读材料。 |
-| 模型通信（2） | `llm`、`transport`：JSON 请求、用量与共享账本、停止状态。 |
+| 模型通信（2） | `llm`、`transport`：JSON 请求、显式模型 ID、用量与同授权账本、停止状态。 |
 | 随包基础实现（5） | `_vendor/__init__`、`bounded_process`、`git_repository`、`models`、`schema_adapter`：受限进程、Git 对象与格式规则。 |
 
 ```text
