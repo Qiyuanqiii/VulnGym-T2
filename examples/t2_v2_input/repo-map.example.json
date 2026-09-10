@@ -1,0 +1,18 @@
+{
+  "GHSA-JP4J-Q5FC-58GV": {
+    "repo_path": "repos/openclaw",
+    "repo_url": "https://github.com/openclaw/openclaw"
+  },
+  "GHSA-8C4J-F57C-35CF": {
+    "repo_path": "repos/langflow",
+    "repo_url": "https://github.com/langflow-ai/langflow"
+  },
+  "GHSA-MQ4R-H2GH-QV7X": {
+    "repo_path": "repos/Flowise",
+    "repo_url": "https://github.com/FlowiseAI/Flowise"
+  },
+  "GHSA-CM35-V4VP-5XVX": {
+    "repo_path": "repos/open-webui",
+    "repo_url": "https://github.com/open-webui/open-webui"
+  }
+}

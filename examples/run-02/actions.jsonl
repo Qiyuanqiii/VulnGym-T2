@@ -1,0 +1,13 @@
+{"action": {"action": "tool", "automatic": true, "evidence_ref": "E0004", "success": true, "tool": "inspect_commit"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "tool", "automatic": true, "evidence_ref": "E0005", "success": true, "tool": "read_diff"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "model_call", "call": 1, "stage": "plan_and_read"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "plan", "plan": "Read the vulnerable parent revisions of the affected Discord component files to identify the reachable handler entry point and missing policy gate.", "requested_calls": 2}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "tool", "automatic": false, "evidence_ref": "E0006", "success": true, "tool": "read_file"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "tool", "automatic": false, "evidence_ref": "E0007", "success": true, "tool": "read_file"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "model_call", "call": 2, "stage": "plan_and_read"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "plan", "plan": "Locate the actual Discord component handler declarations and event entry points in the vulnerable parent.", "requested_calls": 2}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "model_call", "call": 3, "stage": "plan_and_read"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "plan", "plan": "Find component class declarations and interaction run methods.", "requested_calls": 2}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "tool", "automatic": false, "evidence_ref": "E0008", "success": true, "tool": "search_code"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "tool", "automatic": false, "evidence_ref": "E0009", "success": true, "tool": "search_code"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}
+{"action": {"action": "model_call", "call": 4, "stage": "plan_and_read"}, "entry_id": "entry-59467", "report_id": "GHSA-JP4J-Q5FC-58GV"}

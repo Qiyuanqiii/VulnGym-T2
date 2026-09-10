@@ -1,0 +1,26 @@
+{
+  "product": "VulnGym T2 v2",
+  "runtime": "Python standard library + Git; no third-party Python packages",
+  "packaging_python": "3.13.12",
+  "runtime_source_files": [
+    "vulngym_t2/__init__.py",
+    "vulngym_t2/__main__.py",
+    "vulngym_t2/_vendor/__init__.py",
+    "vulngym_t2/_vendor/bounded_process.py",
+    "vulngym_t2/_vendor/git_repository.py",
+    "vulngym_t2/_vendor/models.py",
+    "vulngym_t2/_vendor/schema_adapter.py",
+    "vulngym_t2/cli.py",
+    "vulngym_t2/intake.py",
+    "vulngym_t2/llm.py",
+    "vulngym_t2/output.py",
+    "vulngym_t2/pipeline.py",
+    "vulngym_t2/report.py",
+    "vulngym_t2/repository.py",
+    "vulngym_t2/transport.py"
+  ],
+  "source_files": 57,
+  "example_runs": 3,
+  "human_verified": false,
+  "evaluation_note": "Examples preserve their actual completed/error/draft status. They are development runs, not blind accuracy measurements."
+}
