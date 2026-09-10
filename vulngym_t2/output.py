@@ -313,7 +313,7 @@ def finalize_result(job: Mapping[str, Any], result: Mapping[str, Any] | None, re
         entry = _ADAPTER.adapt(draft, formal_t2=True)
     pipeline_errors = result.get("errors", [])
     pipeline_errors = pipeline_errors if isinstance(pipeline_errors, list) else [pipeline_errors]
-    tool_error_prefixes = ("repository ", "read_file failed:", "read_diff failed:", "inspect_commit failed:", "list_files failed:", "search_code failed:")
+    tool_error_prefixes = ("repository ", "read_file failed:", "read_diff failed:", "inspect_commit failed:", "list_files failed:", "search_code failed:", "list_refs failed:", "search_history failed:")
     tool_errors = [error for error in pipeline_errors if str(error).lower().startswith(tool_error_prefixes)]
     model_errors = [error for error in pipeline_errors if error not in tool_errors and not str(error).lower().startswith("input error:")] if not input_error else []
     actions = result.get("actions") if isinstance(result.get("actions"), list) else []

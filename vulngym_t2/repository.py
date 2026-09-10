@@ -28,8 +28,13 @@ MAX_TREE_BYTES = 4 * 1024 * 1024
 MAX_MATCHES = 100
 MAX_SEARCH_FILES = 400
 MAX_SEARCH_BYTES = 4 * 1024 * 1024
+MAX_REFS = 100
+MAX_HISTORY_MATCHES = 50
+MAX_HISTORY_SUBJECT_CHARS = 1000
+MAX_HISTORY_BYTES = 4 * 1024 * 1024
 TOOL_TIMEOUT_SECONDS = 20
 _REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/\-]{0,159}(?:[~^][0-9]{0,4}){0,4}\Z")
+_REF_PREFIX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/\-]{0,159}\Z")
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 
 
@@ -94,6 +99,8 @@ class RepoReader:
     """Read one explicitly supplied local repository without checkout or network."""
 
     _TOOLS = {
+        "list_refs": {"prefix", "limit"},
+        "search_history": {"query", "commit", "path", "limit"},
         "inspect_commit": {"commit"},
         "list_files": {"commit", "prefix", "offset", "limit"},
         "read_file": {"commit", "path", "start_line", "end_line"},
@@ -182,6 +189,127 @@ class RepoReader:
         except UnicodeError as error:
             raise ValueError("non_utf8_repo_path") from error
         return sorted(paths)
+
+    def list_refs(self, prefix: str | None = None, limit: int = 30) -> dict[str, Any]:
+        """List bounded local refs; names and tags do not establish version safety.
+
+        Prefixes match the literal beginning of full ref names (for example,
+        ``refs/tags/v1``). HEAD is not a ref in this listing; ``info`` exposes it.
+        Tags of non-commit objects remain visible with a null commit.
+        """
+        limit = _number(limit, 1, MAX_REFS)
+        if prefix is not None and (
+            not isinstance(prefix, str) or not _REF_PREFIX.fullmatch(prefix)
+            or ".." in prefix or "//" in prefix
+        ):
+            raise ValueError("invalid_ref_prefix")
+        args = ("for-each-ref", "--sort=refname", f"--count={limit + 1}",
+                "--format=%(refname)%00%(objecttype)%00%(objectname)%00"
+                "%(*objecttype)%00%(*objectname)", "--")
+        if prefix is not None:
+            # Git's ref wildcards are path-aware: the second pattern also
+            # includes arbitrary descendants of matching name prefixes.
+            args += (prefix + "*", prefix + "*/**")
+        raw = self._run(args, limit=MAX_HISTORY_BYTES)
+        records = raw.split(b"\n")
+        if records[-1] != b"":
+            raise ValueError("git_refs_response_invalid")
+        records.pop()
+        if len(records) > limit + 1:
+            raise ValueError("git_refs_response_invalid")
+        refs: list[dict[str, Any]] = []
+        chars = 0
+        for record in records[:limit]:
+            try:
+                name, object_type, object_id, peeled_type, peeled_id = (
+                    piece.decode("utf-8", errors="strict") for piece in record.split(b"\0"))
+                if (not name.startswith("refs/") or any(ord(char) < 32 for char in name)
+                        or object_type not in {"commit", "tag", "tree", "blob"}
+                        or not _SHA.fullmatch(object_id)
+                        or (peeled_type and (peeled_type not in {"commit", "tag", "tree", "blob"}
+                                             or not _SHA.fullmatch(peeled_id)))
+                        or (not peeled_type and peeled_id)
+                        or (prefix is not None and not name.startswith(prefix))):
+                    raise ValueError
+            except (ValueError, UnicodeError) as error:
+                raise ValueError("git_refs_response_invalid") from error
+            if chars + len(name) > MAX_TEXT_CHARS:
+                break
+            commit = object_id if object_type == "commit" else (
+                peeled_id if object_type == "tag" and peeled_type == "commit" else None)
+            kind = ("branch" if name.startswith("refs/heads/") else
+                    "tag" if name.startswith("refs/tags/") else
+                    "remote" if name.startswith("refs/remotes/") else "ref")
+            refs.append({"name": name, "kind": kind, "object_type": object_type,
+                         "object_id": object_id, "commit": commit})
+            chars += len(name)
+        return {"refs": refs, "prefix": prefix, "truncated": len(records) > len(refs),
+                "evidence_scope": "local ref identities only; not proof of vulnerability or safety",
+                "limits": {"refs": limit, "text_chars": MAX_TEXT_CHARS,
+                           "output_bytes": MAX_HISTORY_BYTES,
+                           "process_timeout_seconds": self._git.timeout_seconds}}
+
+    def search_history(self, query: str, commit: str = "HEAD", path: str | None = None,
+                       limit: int = 20) -> dict[str, Any]:
+        """Search messages in reachable local history, not inferred fix status.
+
+        A fixed-string Git message search is bounded by matching-record count,
+        output bytes and process time. An empty result is never evidence that a
+        fix or vulnerable version does not exist, even in a non-shallow clone.
+        """
+        if (not isinstance(query, str) or not query.strip() or len(query) > 256
+                or any(char in query for char in "\x00\r\n")):
+            raise ValueError("invalid_search_query")
+        limit = _number(limit, 1, MAX_HISTORY_MATCHES)
+        path = None if path is None else _path(path)
+        commit = self.resolve_commit(commit)
+        args = ("log", "--no-patch", "--no-ext-diff", "--no-textconv", "--no-notes",
+                "--no-decorate", "--no-show-signature", "--encoding=UTF-8",
+                "--fixed-strings", f"--grep={query}",
+                f"--max-count={limit + 1}", "--format=tformat:%H%x00%P%x00%s", "-z",
+                commit, "--")
+        if path is not None:
+            args += (path,)
+        raw = self._run(args, limit=MAX_HISTORY_BYTES)
+        records = raw.split(b"\0")
+        if records[-1] != b"" or (len(records) - 1) % 3:
+            raise ValueError("git_history_response_invalid")
+        records.pop()
+        if len(records) // 3 > limit + 1:
+            raise ValueError("git_history_response_invalid")
+        matches: list[dict[str, Any]] = []
+        chars = 0
+        for index in range(0, min(len(records), limit * 3), 3):
+            try:
+                sha = records[index].decode("ascii")
+                parents = records[index + 1].decode("ascii").split()
+                if not _SHA.fullmatch(sha) or any(not _SHA.fullmatch(item) for item in parents):
+                    raise ValueError
+            except (ValueError, UnicodeError) as error:
+                raise ValueError("git_history_response_invalid") from error
+            subject = records[index + 2].decode("utf-8", errors="replace")
+            subject_truncated = len(subject) > MAX_HISTORY_SUBJECT_CHARS
+            subject = subject[:MAX_HISTORY_SUBJECT_CHARS]
+            size = len(sha) + sum(len(parent) + 1 for parent in parents) + len(subject)
+            if chars + size > MAX_TEXT_CHARS:
+                break
+            matches.append({"commit": sha, "parents": parents, "subject": subject,
+                            "subject_truncated": subject_truncated})
+            chars += size
+        try:
+            shallow = self._git.history_is_shallow()
+        except GitFactError as error:
+            raise ValueError(_code(error)) from error
+        has_more = len(records) // 3 > len(matches)
+        return {"commit": commit, "query": query, "path": path, "matches": matches,
+                "has_more": has_more,
+                "truncated": has_more or any(item["subject_truncated"] for item in matches),
+                "shallow": shallow, "negative_result_conclusive": False,
+                "search_scope": "case-sensitive literal message search in reachable local history; "
+                                "optional literal path filter; ref identities are not vulnerability proof",
+                "limits": {"matches": limit, "subject_chars": MAX_HISTORY_SUBJECT_CHARS,
+                           "text_chars": MAX_TEXT_CHARS, "output_bytes": MAX_HISTORY_BYTES,
+                           "process_timeout_seconds": self._git.timeout_seconds}}
 
     def list_files(self, commit: str, prefix: str | None = None,
                    offset: int = 0, limit: int = 100) -> dict[str, Any]:

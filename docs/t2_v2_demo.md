@@ -116,7 +116,7 @@ $t2Review.evidence | Where-Object { $_.id -in $t2Refs -and $_.tool -eq 'read_fil
 $t2Review | Select-Object location_checks, location_corrections | ConvertTo-Json -Depth 10
 ```
 
-这里只展示当前案例的动作和 EP/CO 引用的一份源码证据，避免把整批长文本刷满终端。讲清楚模型怎样根据公告/差异读取 commit/相对路径，再形成草稿、自查与回改。当前流程把本地 schema/源码预检查反馈给原有一次自查，不增加额外 HTTP；旧一些运行若无 `draft_validation`，就按它实际记录说明。工具只有上述五种只读能力，不是任意 shell；未进入自查或没有引用源码证据时，也不补讲成已发生。
+这里只展示当前案例的动作和 EP/CO 引用的一份源码证据，避免把整批长文本刷满终端。讲清楚模型怎样根据公告/差异读取 commit/相对路径，再形成草稿、自查与回改。当前流程把本地 schema/源码预检查反馈给原有一次自查，不增加额外 HTTP；旧一些运行若无 `draft_validation`，就按它实际记录说明。随包旧运行使用五种只读工具；后续已增加本地 refs/历史搜索，但不要把新增能力冒称在旧运行中已发生。工具不是任意 shell；未进入自查或没有引用源码证据时，也不补讲成已发生。
 
 入口与缺陷位置需引用同一选定 commit 的实际 `read_file` 行，再由 `location_checks` 核验逐字一致。`location_corrections` 若非空，只允许原坐标也在已读窗口内、同版本同路径片段唯一逐字匹配时修正行号，不改变代码或语义置信度。公告、diff 或搜索命中不能替代源码读取。**这些检查不证明入口可达、攻击者可控、类别正确或漏洞可利用；同模型自查不是独立人工审计。**
 

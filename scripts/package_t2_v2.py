@@ -9,9 +9,9 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULES = ("__init__", "__main__", "cli", "intake", "llm", "output", "pipeline", "repository", "report", "transport")
+MODULES = ("__init__", "__main__", "cli", "intake", "llm", "output", "pending", "pipeline", "repository", "report", "transport")
 VENDOR = ("__init__", "bounded_process", "git_repository", "models", "schema_adapter")
-DOCS = ("t2_v2_design", "t2_v2_demo", "t2_v2_packaging", "t2_v2_iteration_history", "t2_v2_results")
+DOCS = ("t2_v2_design", "t2_v2_demo", "t2_v2_packaging", "t2_v2_iteration_history", "t2_v2_results", "t2_goals")
 PUBLIC_RESULTS = ("entries.jsonl", "reports.jsonl", "review.jsonl", "actions.jsonl", "summary.json", "assessment.md")
 PUBLIC_INPUT_FILES = (
     "README.md", "urls.txt", "repo-map.example.json",

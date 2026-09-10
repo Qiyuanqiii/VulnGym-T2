@@ -14,13 +14,14 @@
     "vulngym_t2/intake.py",
     "vulngym_t2/llm.py",
     "vulngym_t2/output.py",
+    "vulngym_t2/pending.py",
     "vulngym_t2/pipeline.py",
     "vulngym_t2/report.py",
     "vulngym_t2/repository.py",
     "vulngym_t2/transport.py"
   ],
-  "source_files": 57,
+  "source_files": 61,
   "example_runs": 3,
   "human_verified": false,
-  "evaluation_note": "Examples preserve their actual completed/error/draft status. They are development runs, not blind accuracy measurements."
+  "evaluation_note": "Examples preserve their actual completed/error/draft status. They are development runs, not blind accuracy measurements. The later history tools and offline pending-list helper have no new real-model evaluation yet; docs/T2-design.pdf is the initial delivery snapshot."
 }

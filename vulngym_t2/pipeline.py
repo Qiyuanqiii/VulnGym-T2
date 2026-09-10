@@ -20,6 +20,8 @@ ENTRY_FIELDS = (
 )
 READ_TOOLS = {
     "inspect_commit": ("commit",),
+    "list_refs": ("prefix", "limit"),
+    "search_history": ("query", "commit", "path", "limit"),
     "list_files": ("commit", "prefix", "offset", "limit"),
     "read_file": ("commit", "path", "start_line", "end_line"),
     "search_code": ("commit", "query", "paths"),
@@ -51,7 +53,17 @@ Reply with ONE JSON object, in one of these forms:
 Allowed read tools and arguments:
 inspect_commit(commit); list_files(commit,prefix?,offset?,limit?);
 read_file(commit,path,start_line?,end_line?); search_code(commit,query,paths?);
-read_diff(before,after,path?). Use a tools response to request reads before the
+read_diff(before,after,path?); list_refs(prefix?,limit?);
+search_history(query,commit?,path?,limit?). History search matches literal text
+in local commit messages; the default start is HEAD, not all remote history.
+Some supplied object repositories have no resolvable HEAD. In that case first
+list_refs, then explicitly select a returned commit as the history start; do
+not assume HEAD exists or treat the selected ref as an affected version.
+When no fix is supplied, use local refs and message/history clues where helpful,
+then inspect changes and read the actual source. A tag name or message match is
+only a navigation clue; a missing match or truncated history is not evidence
+that the behavior does not exist. No history tool identifies a vulnerable
+revision automatically. Use a tools response to request reads before the
 draft. Use narrow reads and different queries, not identical requests. All tool
 evidence has controller-assigned IDs; only cite existing IDs and shown content.
 

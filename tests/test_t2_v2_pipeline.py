@@ -131,6 +131,47 @@ def metadata_job():
 
 
 class PipelineTests(unittest.TestCase):
+    def test_no_fix_input_can_request_local_history_before_source_reads(self):
+        class HistoryRepo(StubRepo):
+            def call(self, tool, arguments):
+                if tool in {"list_refs", "search_history"}:
+                    self.calls.append((tool, copy.deepcopy(arguments)))
+                    if tool == "list_refs":
+                        return {"refs": [{"name": "refs/tags/v1", "commit": VULNERABLE}], "truncated": False}
+                    return {"commit": FIXED, "matches": [{"commit": FIXED, "parents": [VULNERABLE],
+                            "subject": "CVE-2026-12345 expression restriction"}], "truncated": False,
+                            "negative_result_conclusive": False}
+                return super().call(tool, arguments)
+
+        def inspect_found(messages):
+            history = next(row for row in evidence_from(messages) if row.get("tool") == "search_history")
+            return {"action": "tools", "plan": "Inspect the candidate, not assume it is vulnerable.",
+                    "calls": [{"tool": "inspect_commit", "arguments": {"commit": history["result"]["matches"][0]["commit"]}}]}
+
+        repo = HistoryRepo()
+        client = StubClient(
+            {"action": "tools", "calls": [{"tool": "list_refs", "arguments": {"prefix": "refs/tags/", "limit": 5}}]},
+            {"action": "tools", "calls": [{"tool": "search_history", "arguments": {"query": "CVE-2026-12345", "limit": 5}}]},
+            inspect_found, choose_source, source_draft, retain_review)
+        result = produce(job(False), client, repo, max_calls=6)
+        self.assertEqual([name for name, _ in repo.calls], ["list_refs", "search_history", "inspect_commit", "read_file"])
+        self.assertEqual(result["model_calls"], 6)
+        self.assertEqual(result["fields"]["commit"], VULNERABLE)
+        self.assertEqual(result["fields"]["verify"], 0)
+        self.assertTrue(any(row.get("tool") == "search_history" and row["success"] for row in result["evidence"]))
+
+    def test_history_clues_alone_do_not_fill_a_vulnerable_commit(self):
+        class HistoryRepo(StubRepo):
+            def call(self, tool, arguments):
+                self.calls.append((tool, arguments))
+                return {"refs": [{"name": "refs/tags/old-release", "commit": VULNERABLE}], "truncated": False}
+        result = produce(job(False), StubClient(
+            {"action": "tools", "calls": [{"tool": "list_refs", "arguments": {}}]},
+            retain_review, retain_review), HistoryRepo(), max_calls=3)
+        self.assertNotIn("commit", result["fields"])
+        self.assertNotIn("entry_point", result["fields"])
+        self.assertEqual(result["field_reviews"]["commit"]["status"], "missing")
+
     def test_existing_self_review_receives_real_validation_feedback(self):
         def malformed(messages):
             response = source_draft(messages)
