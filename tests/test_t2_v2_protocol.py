@@ -20,6 +20,10 @@ def step(records=None, *, calls=None):
             "records": [] if records is None else records, "summary": ""}
 
 
+def location_ref(*, evidence_ref="E0001", start_line=1, end_line=2, desc=""):
+    return {"evidence_ref": evidence_ref, "start_line": start_line, "end_line": end_line, "desc": desc}
+
+
 def tool_envelope(value=None, *, arguments=None, model="deepseek-v4-pro"):
     return json.dumps({"object": "chat.completion", "model": model, "choices": [{
         "index": 0, "finish_reason": "tool_calls", "message": {
@@ -34,7 +38,7 @@ class ProtocolTests(unittest.TestCase):
         definition = protocol.strict_tool_definition()
         self.assertEqual(definition["function"]["name"], "submit_step")
         self.assertIs(definition["function"]["strict"], True)
-        seen_tools, seen_fields = set(), set()
+        seen_tools, seen_fields, seen_locations = set(), set(), []
 
         def visit(value):
             if isinstance(value, dict):
@@ -48,6 +52,10 @@ class ProtocolTests(unittest.TestCase):
                         self.assertEqual(set(value["properties"]["arguments"]["properties"]), set(READ_TOOLS[name]))
                     if "has_value" in value["properties"]:
                         seen_fields.update(value["properties"]["name"]["enum"])
+                    if "evidence_ref" in value["properties"]:
+                        seen_locations.append(value)
+                        self.assertEqual(set(value["properties"]), {"evidence_ref", "start_line", "end_line", "desc"})
+                        self.assertFalse(set(value["properties"]) & {"file", "line", "code"})
                 for child in value.values():
                     visit(child)
             elif isinstance(value, list):
@@ -56,18 +64,57 @@ class ProtocolTests(unittest.TestCase):
         visit(definition)
         self.assertEqual(seen_tools, set(READ_TOOLS))
         self.assertEqual(seen_fields, set(ENTRY_FIELDS))
+        self.assertEqual(len(seen_locations), 2)
         definition["function"]["parameters"]["properties"].clear()
         self.assertTrue(protocol.strict_tool_definition()["function"]["parameters"]["properties"])
 
     def test_all_fifteen_fields_preserve_native_types_and_commit_basis(self):
-        location = {"file": "src/a.py", "line": "1-2", "code": "x = 1\nprint(x)", "desc": ""}
+        location = location_ref()
         values = {name: name + " value" for name in ENTRY_FIELDS}
         values.update(commit="a" * 40, vuln_ids=["GHSA-AAAA-BBBB-CCCC"],
-                      entry_point=location, critical_operation={**location, "line": 1}, trace=[location], verify=0)
+                      entry_point=location, critical_operation={**location, "end_line": 1}, trace=[location], verify=0)
         result = protocol.normalize_step(step([record(name, value) for name, value in values.items()]))
         self.assertEqual(result["fields"], values)
         self.assertEqual(result["field_reviews"]["commit"]["revision_basis"], "behavior_at_revision")
         self.assertNotIn("revision_basis", result["field_reviews"]["entry_point"])
+
+    def test_location_references_survive_normalization_for_fields_and_suggestions(self):
+        for status in ("supported", "uncertain", "missing", "conflicting"):
+            value = step([record("entry_point", location_ref(), status=status),
+                          record("critical_operation", location_ref(start_line=3, end_line=4), status=status),
+                          record("trace", [location_ref(), location_ref(start_line=3, end_line=4)], status=status)])
+            original = copy.deepcopy(value)
+            result = protocol.normalize_step(value)
+            self.assertEqual(value, original)
+            for item in value["records"]:
+                if status == "supported":
+                    normalized = result["fields"][item["name"]]
+                else:
+                    self.assertNotIn(item["name"], result["fields"])
+                    normalized = result["field_reviews"][item["name"]]["suggested_value"]
+                self.assertEqual(normalized, item["value"])
+                self.assertIsNot(normalized, item["value"])
+
+    def test_unknown_locations_stay_unknown_without_creating_references(self):
+        result = protocol.normalize_step(step([record(name, "", has_value=False, status="missing")
+                                               for name in ("entry_point", "critical_operation", "trace")]))
+        self.assertEqual(result["fields"], {})
+        for review in result["field_reviews"].values():
+            self.assertNotIn("suggested_value", review)
+
+    def test_location_reference_shape_and_ranges_are_checked_without_source_repair(self):
+        invalid = [location_ref(evidence_ref=value) for value in ("", "E1", "E123456789", "e0001", "E0001\n", "advisory-1")]
+        invalid.extend(location_ref(start_line=value) for value in (0, -1, True, "1", 1.0, 100_000_001))
+        invalid.extend(location_ref(end_line=value) for value in (0, -1, False, "2", 2.0, 100_000_001))
+        invalid.extend([location_ref(start_line=3, end_line=2),
+                        {**location_ref(), "code": "must not be transcribed"},
+                        {"file": "src/a.py", "line": 1, "code": "legacy public shape", "desc": ""},
+                        {key: value for key, value in location_ref().items() if key != "desc"}])
+        for location in invalid:
+            for name in ("entry_point", "critical_operation", "trace"):
+                value = [location] if name == "trace" else location
+                with self.subTest(name=name, location=location), self.assertRaises(protocol.ProtocolError):
+                    protocol.normalize_step(step([record(name, value)]))
 
     def test_unknown_placeholder_is_omitted_and_non_supported_values_are_suggestions(self):
         result = protocol.normalize_step(step([
@@ -126,7 +173,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_local_bounds_remain_enforced_without_unsupported_schema_keywords(self):
         invalid = [step(calls=[{"tool": "inspect_commit", "arguments": {"commit": "a" * 40}}] * 7),
-                   step([record()] * 16), step([record("trace", [{"file": "a", "line": 1, "code": "x", "desc": ""}] * 33)]),
+                   step([record()] * 16), step([record("trace", [location_ref()] * 33)]),
                    step([record("vuln_title", "x" * 32_001)])]
         value = step([record()])
         value["records"][0]["evidence_refs"] = ["E0001"] * 25

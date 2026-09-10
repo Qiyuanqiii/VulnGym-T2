@@ -74,6 +74,29 @@ class ReportTests(unittest.TestCase):
                 self.assertEqual((summary, reviews), before)
                 self.assertEqual(reviews[0]["status"], "draft")
 
+    def test_evidence_followup_status_is_adjacent_to_self_review_and_not_human_verification(self):
+        cases = [("not_requested", "未请求（不是失败）"), ("completed", "已完成聚焦补证"),
+                 ("failed", "聚焦补证失败"), (None, "旧记录未声明"),
+                 (["completed"], "未识别声明"), ("<script>unknown</script>", "未识别声明")]
+        for status, label in cases:
+            with self.subTest(status=status):
+                summary, reviews = fixture()
+                reviews[0]["self_review_status"] = "not_requested"
+                if status is not None:
+                    reviews[0]["evidence_followup_status"] = status
+                before = deepcopy((summary, reviews))
+                content = _assessment(summary, reviews)
+                lines = content.splitlines()
+                index = next(i for i, line in enumerate(lines) if line.startswith("- 聚焦补证状态："))
+                self.assertIn("聚焦补证状态：" + label, lines[index])
+                self.assertTrue(lines[index + 1].startswith("- 机器自查状态：未请求（不是失败）"))
+                self.assertIn("最多1个模型轮次、2次只读工具", lines[index])
+                self.assertIn("非人工验收，不保证语义正确", lines[index])
+                self.assertNotIn("<script>", content)
+                self.assertEqual((summary, reviews), before)
+                self.assertEqual(reviews[0]["status"], "draft")
+                self.assertEqual(reviews[0]["draft_fields"]["verify"], 0)
+
     def test_completed_with_errors_preserves_draft_and_exposes_case_failures(self):
         summary, reviews = fixture()
         summary.update(status="completed_with_errors", format_failure_count=1,
@@ -127,6 +150,7 @@ class ReportTests(unittest.TestCase):
                            case_failures=[{"report_id": "REPORT-synthetic", "code": "model_format_failure",
                                            "continued": True}])
             reviews[0]["field_reviews"]["commit"]["revision_basis"] = "inspected_only"
+            reviews[0]["evidence_followup_status"] = "completed"
             (run / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
             (run / "review.jsonl").write_text(json.dumps(reviews[0]) + "\n", encoding="utf-8")
             before = {path.name: path.read_bytes() for path in run.iterdir()}
@@ -135,6 +159,7 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(destination, run / "assessment.md")
             content = destination.read_text(encoding="utf-8")
             self.assertIn("版本判断依据（已记录机器声明）：仅检查过", content)
+            self.assertIn("聚焦补证状态：已完成聚焦补证", content)
             self.assertIn("不是全成功", content)
             self.assertEqual(before, {name: (run / name).read_bytes() for name in before})
             self.assertEqual({path.name for path in run.iterdir()}, set(before) | {"assessment.md"})

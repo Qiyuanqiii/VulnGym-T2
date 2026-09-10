@@ -12,6 +12,8 @@
 
 同一授权账本目前累计 60 次生成请求（含 2 次纯协议短测），另有 1 次目录查询，共 **61/500 次**；已报告用量 **656,871 tokens**，另有此前 1 次传输失败请求用量未知，不是精确总 token。本轮调用已结束，没有重置预算或自动重试；密钥不在交付材料中。
 
+在上述实跑之后，已完成一轮**仅离线的引用式输出优化**：strict_tool 的源码位置改由模型选证据ID及行范围，程序复制原文；加入有预算上限的聚焦补证，并减少重复源码上下文。新内部协议尚未做真实服务复测，不能套用旧实跑成绩。最终 entries/reports 格式不变，已有九批公开结果也不重算。
+
 ## 不用 key，先看真实结果
 
 在项目根目录运行以下命令，将已有真实结果整理成便于评审阅读的 Markdown。输出必须是尚不存在的新文件，且不能放进原运行目录；不会读取目标仓库、联网或修改原 JSONL。
@@ -78,6 +80,8 @@ python -m vulngym_t2 --advisory D:\T2\materials\advisory.md --repo D:\T2\repos\p
 在正式命令末尾添加 `--response-mode strict_tool`，可显式启用 [DeepSeek 严格函数输出（Beta）](https://api-docs.deepseek.com/guides/tool_calls/)：通过官方 `/beta/chat/completions` 返回 `submit_step` 的结构化参数，不再把自由正文当成动作 JSON。该函数只是回答容器，仍只能经原控制器使用七种只读工具，不执行模型自造函数。保留 thinking 与原 reasoning_effort；使用 `tool_choice=auto`，因为供应商不支持 thinking 下强制 required/指定函数。客户端只接受单个正确容器，未调用容器、多函数或无效参数都会明确失败，不猜补、不静默切回旧模式。
 
 如需强制回答容器，显式添加 `--response-mode strict_tool --thinking disabled`。这会关闭供应商 thinking，使用 `tool_choice=required` 并省略不适用的 `reasoning_effort`；并非同一推理配置的等价替换，实际设置记在 summary。它不会增加执行能力，仍只接受一个合法 `submit_step`；鉴权、权限、拒绝、网络等错误仍停止，没有正文回退或自动重试。官方说明见 [Chat Completions 参数](https://api-docs.deepseek.com/api/create-chat-completion/)。
+
+当前 strict_tool 的内部位置值是 `{evidence_ref,start_line,end_line,desc}`，不再要求模型抄写 file/code。只允许从同SHA、成功read_file、实际展示的连续行中展开，单处最多200行；未知引用、版本不符或未展示的行会留作未验证建议，不猜填源码。程序最终仍输出标准 `{file,line,code,desc}`，不存在把证据ID塞进正式样本替代源码的情况。旧 json 模式继续兼容展开位置格式。
 
 省略参数仍为 `json` 和 `thinking=enabled`，兼容旧脚本；`json + disabled` 会在读取密钥前明确拒绝。两种严格配置已各通过一次短协议实测，但 `enabled + auto` 在真实 run-08 第二个响应返回 `stop`，导致停止。**短协议成功不证明真实任务稳定或语义正确**；各配置的后续实际结果见实跑记录，旧样例不冒充新模式成绩。
 
@@ -152,11 +156,21 @@ repo-map 中的相对路径以映射文件所在目录为基准。上面三种�
 
 新运行的 commit 须给出 `revision_basis`：`behavior_at_revision`（该版本源码机制依据）、`affected_range_and_source`（影响范围与源码关联）、`inspected_only`（仅检查过）或 `unknown`。后两类及缺声明保留为 uncertain，候选 SHA 放入建议；前两类还需简短理由及所选 SHA 的实际源码读取引用。不强制修复链接或官方版本表，不按理由关键词猜测语义。通过检查仍是机器判断。旧记录缺字段只显示“旧记录未声明”，不重算旧结果。
 
-首次草稿先做本地 schema/字段与源码位置预检查，把实际错误和行号修正反馈给原有的那一次 self-review，让模型据已读证据回改或保留未知；这不会额外增加模型自查轮次或 HTTP 请求。最后仍做终检，本地检查和模型回改都不替代语义复核。
+strict_tool 首次草稿后，若原模型预算还余至少2次且读工具预算未耗尽，可进行一次聚焦补证：专看外部入口/所属handler是否真的读过，以及源码机制与版本范围是否被混淆。该步骤最多增加1次模型调用和2次有界读取，仍计入原有总预算；只允许read_file/search_code/inspect_commit/read_diff，不另开探索循环。模型也可以不补读、只返回更正/降级或空增量。预算不足时不请求，明确显示not_requested。
+
+随后进行本地 schema/字段与源码位置预检查，把实际错误和行号修正反馈给原有的一次最终 self-review。这一步禁止再读工具，只返回修改字段；strict历史也使用源码引用，不回传一份重复的大段code。最后仍做终检，本地检查、补证完成及模型自查均不替代语义复核。该流程给模型补足依据的机会，不保证它一定能正确判断入口或版本。
 
 批次逐条保存结果。`summary.status: completed` 仅表示批次走完，可能没有完整候选。新版默认把已确认的单条正文格式错误留在当前草稿，随后继续同一授权内尚未开始的不同输入，不重试失败项、不重置账本；`--stop-on-format-error` 恢复旧全停方式。全部输入遍历完但含此类失败时为 `completed_with_errors`，退出码 2，`case_failures` 记录失败及是否继续下一项。这不是全成功，也不表示后台仍有剩余任务。
 
 网络、鉴权、权限、拒绝、模型不符、截断或未知故障仍为 `provider_stopped` 并停下，不利用错误隔离绕过访问限制；剩余输入计入 `unprocessed_input_count`。已请求自查却未完成时，`self_review_status=failed`，保留初稿但不导出完整候选；未请求自查为 `not_requested`，不伪称失败或完成。启动错误可能尚无输出目录；强制终止仍可能使当前输入或汇总未落盘，不能把不存在的 summary 当成一次已完成运行。
+
+`evidence_followup_status` 独立记录聚焦补证的not_requested/completed/failed；失败保留草稿和证据，不导出完整候选，旧样例缺字段显示旧记录未声明。源码在提示中仅发送一份带行号表示；同SHA/路径且已完整展示的子区间可复用原证据，不重复读取。完整的已读证据仍在复核产物中保存。
+
+### 正式样本与复核材料的区别
+
+对当前run-01至run-09做的离线格式核对通过：合计9条entry、9条report、34处location，15字段、类型、来源/ID/SHA、report关联、字段序和行序均符合本仓库 `SCHEMA.md`。这些是重复开发运行，不是9个独立案例；格式正确不等于入口或机制已确认，所有自动entry的verify仍为0。
+
+正式数据交 `entries.jsonl` 和 `reports.jsonl`。`review.jsonl`、`actions.jsonl`、`summary.json`、`assessment.md` 是辅助复核/过程材料，允许保存未知值、建议和额外状态，不能将review直接拼进entries。SCHEMA中的184/408是原始数据集发布条数，不是本工具每次必须生成的数量；本工具目前每份输入最多一个entry，覆盖全部多入口是另一个能力边界。
 
 已结束的目录可离线生成便于提交和人工复核的中文自动自评，不用密钥，也不产生新模型请求：
 

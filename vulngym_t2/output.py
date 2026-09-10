@@ -349,8 +349,14 @@ def finalize_result(job: Mapping[str, Any], result: Mapping[str, Any] | None, re
     if self_review_status == "failed":
         errors.append({"field": None, "code": "self_review_incomplete",
                        "message": "The requested self-review did not return a valid draft; initial fields and evidence are retained for review, not exported as a complete entry."})
+    evidence_followup_status = result.get("evidence_followup_status", "not_requested")
+    if evidence_followup_status not in ("not_requested", "completed", "failed"):
+        evidence_followup_status = "failed"
+    if evidence_followup_status == "failed":
+        errors.append({"field": None, "code": "evidence_followup_incomplete",
+                       "message": "The focused evidence follow-up failed; preserve the draft and evidence for review without claiming a complete entry."})
     entry = None
-    if not input_error and self_review_status != "failed" and all(draft[field] is not None for field in ENTRY_FIELDS):
+    if not input_error and self_review_status != "failed" and evidence_followup_status != "failed" and all(draft[field] is not None for field in ENTRY_FIELDS):
         entry = _ADAPTER.adapt(draft, formal_t2=True)
     pipeline_errors = result.get("errors", [])
     pipeline_errors = pipeline_errors if isinstance(pipeline_errors, list) else [pipeline_errors]
@@ -363,6 +369,7 @@ def finalize_result(job: Mapping[str, Any], result: Mapping[str, Any] | None, re
         "source_link": trusted.get("source_link"),
         "status": "input_failure" if input_error else "complete" if entry is not None else "draft",
         "self_review_status": self_review_status,
+        "evidence_followup_status": evidence_followup_status,
         "draft_fields": draft, "field_reviews": reviews, "suggested_values": suggestions,
         "errors": errors, "pipeline_errors": pipeline_errors, "model_errors": model_errors, "tool_errors": tool_errors,
         "model_calls": result.get("model_calls", 0), "tool_calls": result.get("tool_calls", 0),

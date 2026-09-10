@@ -20,9 +20,10 @@
     "vulngym_t2/report.py",
     "vulngym_t2/repository.py",
     "vulngym_t2/review_export.py",
+    "vulngym_t2/source_refs.py",
     "vulngym_t2/transport.py"
   ],
-  "source_files": 110,
+  "source_files": 113,
   "example_runs": 9,
   "human_verified": false,
   "evaluation_note": "Examples preserve their actual completed/error/draft status. They are overlapping development runs, not blind accuracy measurements. V4.1 Flash full-input and reduced-input diagnostics, observed prose improvements and remaining failures are documented in docs/t2_v41_results.md. Offline exports do not change model or human verification status. See docs/t2_case_notes.md for older narrative corrections; docs/T2-design.pdf is the initial delivery snapshot."

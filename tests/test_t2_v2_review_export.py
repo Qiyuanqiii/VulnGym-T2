@@ -245,6 +245,32 @@ class ReviewExportTests(unittest.TestCase):
                 self.assertEqual((self.summary, self.entries, self.reviews), before)
                 self.assertEqual(self.reviews[0]["status"], "draft")
 
+    def test_evidence_followup_status_is_adjacent_to_self_review_without_mutation(self):
+        cases = [("not_requested", "未请求（不是失败）"), ("completed", "已完成聚焦补证"),
+                 ("failed", "聚焦补证失败"), (None, "旧记录未声明"),
+                 (["completed"], "未识别声明"), ("<script>unknown</script>", "未识别声明")]
+        for status, label in cases:
+            with self.subTest(status=status):
+                self.reviews[0]["self_review_status"] = "not_requested"
+                if status is None:
+                    self.reviews[0].pop("evidence_followup_status", None)
+                else:
+                    self.reviews[0]["evidence_followup_status"] = status
+                before = deepcopy((self.summary, self.entries, self.reviews))
+                packet = render_packet(self.summary, self.entries, self.reviews)
+                section = packet.split("## 逐条复核 ")[1]
+                lines = section.splitlines()
+                index = next(i for i, line in enumerate(lines) if line.startswith("聚焦补证状态："))
+                self.assertIn("聚焦补证状态：" + label, lines[index])
+                self.assertEqual(lines[index + 1], "")
+                self.assertTrue(lines[index + 2].startswith("机器自查状态：未请求（不是失败）"))
+                self.assertIn("最多1个模型轮次、2次只读工具", lines[index])
+                self.assertIn("非人工验收，不保证语义正确", lines[index])
+                self.assertNotIn("<script>", section)
+                self.assertEqual((self.summary, self.entries, self.reviews), before)
+                self.assertEqual(self.reviews[0]["status"], "draft")
+                self.assertEqual(self.reviews[0]["draft_fields"]["verify"], 0)
+
     def test_completed_with_errors_is_finished_but_not_all_successful(self):
         self.summary.update(status="completed_with_errors", requested_input_count=3,
                             unprocessed_input_count=0, format_failure_count=1, provider={},

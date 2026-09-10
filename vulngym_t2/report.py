@@ -23,6 +23,8 @@ _REVISION_BASIS_LABELS = {
 }
 _SELF_REVIEW_LABELS = {"not_requested": "未请求（不是失败）", "completed": "已完成机器自查",
                        "failed": "机器自查失败"}
+_EVIDENCE_FOLLOWUP_LABELS = {"not_requested": "未请求（不是失败）", "completed": "已完成聚焦补证",
+                             "failed": "聚焦补证失败"}
 _SECRET = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b|(?i:Bearer\s+)[^\s\"']+")
 _PATH = re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/][^\s\"'<>]*|\\\\[^\s\"'<>]+|/(?:Users|home|tmp|var/tmp)/[^\s\"'<>]*)")
 
@@ -81,6 +83,13 @@ def _self_review_status_label(review: Mapping[str, Any]) -> str:
         return "旧记录未声明"
     value = review["self_review_status"]
     return _SELF_REVIEW_LABELS.get(value, "未识别声明") if isinstance(value, str) else "未识别声明"
+
+
+def _evidence_followup_status_label(review: Mapping[str, Any]) -> str:
+    if "evidence_followup_status" not in review:
+        return "旧记录未声明"
+    value = review["evidence_followup_status"]
+    return _EVIDENCE_FOLLOWUP_LABELS.get(value, "未识别声明") if isinstance(value, str) else "未识别声明"
 
 
 def _validate_terminal_counts(summary: Mapping[str, Any], reviews: list[dict]) -> None:
@@ -197,6 +206,8 @@ def _assessment(summary: Mapping[str, Any], reviews: list[dict]) -> str:
         lines.extend([
             f"### {index}. {_md(review.get('report_id'), 100)} / {_md(review.get('entry_id'), 80)}", "",
             f"- 状态：{_md(review.get('status'))}；公告：{_md(review.get('source_link'), 240)}。",
+            "- 聚焦补证状态：" + _evidence_followup_status_label(review)
+            + "；首次草稿后、最终自查前，最多1个模型轮次、2次只读工具调用；非人工验收，不保证语义正确。",
             "- 机器自查状态：" + _self_review_status_label(review) + "；机器自查不等于独立人工审核。",
             f"- 已知项目 / 标题：{_md(fields.get('project'), 120)} / {_md(fields.get('vuln_title'), 320)}。",
             f"- 已记录 commit（不代表已确认漏洞版本）：{_md(fields.get('commit'), 80)}。",

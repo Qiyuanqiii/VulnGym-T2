@@ -24,6 +24,8 @@ _REVISION_BASIS_LABELS = {
 }
 _SELF_REVIEW_LABELS = {"not_requested": "未请求（不是失败）", "completed": "已完成机器自查",
                        "failed": "机器自查失败"}
+_EVIDENCE_FOLLOWUP_LABELS = {"not_requested": "未请求（不是失败）", "completed": "已完成聚焦补证",
+                             "failed": "聚焦补证失败"}
 _ARGUMENTS = ("commit", "path", "file", "start_line", "end_line", "before", "after",
               "ref", "revision", "query", "pattern", "limit", "max_results", "glob", "prefix", "offset", "paths")
 _RESULT_METADATA = ("commit", "path", "file", "start_line", "end_line", "before", "after",
@@ -241,6 +243,13 @@ def _self_review_status_label(review: dict) -> str:
     return _SELF_REVIEW_LABELS.get(value, "未识别声明") if isinstance(value, str) else "未识别声明"
 
 
+def _evidence_followup_status_label(review: dict) -> str:
+    if "evidence_followup_status" not in review:
+        return "旧记录未声明"
+    value = review["evidence_followup_status"]
+    return _EVIDENCE_FOLLOWUP_LABELS.get(value, "未识别声明") if isinstance(value, str) else "未识别声明"
+
+
 def render_packet(summary: dict, entries: list[dict], reviews: list[dict]) -> str:
     """Validate saved record structure and render an inert Markdown packet."""
     entry_map = _validate(summary, entries, reviews)
@@ -272,7 +281,9 @@ def render_packet(summary: dict, entries: list[dict], reviews: list[dict]) -> st
         lines += [f"## 逐条复核 {number}：{_cell(review['entry_id'])}", ""]
         lines += _table(("已记录身份 / 状态", "值"),
                         ((key, review.get(key)) for key in ("entry_id", "report_id", "source_link", "status", "verification")))
-        lines += ["机器自查状态：" + _self_review_status_label(review) + "。机器自查不等于独立人工审核。", ""]
+        lines += ["聚焦补证状态：" + _evidence_followup_status_label(review)
+                  + "。首次草稿后、最终自查前，最多1个模型轮次、2次只读工具调用；非人工验收，不保证语义正确。", "",
+                  "机器自查状态：" + _self_review_status_label(review) + "。机器自查不等于独立人工审核。", ""]
         if review["status"] == "complete":
             lines += _fields("完整字段（按 entry_id 匹配 entries.jsonl）", entry_map[review["entry_id"]])
         else:

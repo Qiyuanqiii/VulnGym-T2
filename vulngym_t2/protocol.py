@@ -24,9 +24,19 @@ contains a unique field name, has_value, typed value, status, brief reason,
 evidence_refs and revision_basis. Omit unchanged fields from records. For an
 unknown value use has_value=false and value='' (not supported); this placeholder
 is discarded, never supplied as a fact. With has_value=true, uncertain/missing/
-conflicting values remain unverified suggestions. Locations have file, line,
-code, desc (desc may be ''). verify can only be integer 0. Maximum 15 records,
-24 evidence references per field, 32 trace locations; keep prose concise.
+conflicting values remain unverified suggestions. For entry_point,
+critical_operation, and each trace location, return only a read-evidence
+reference: {evidence_ref:'E0001',start_line:1,end_line:2,desc:''}. Both line
+numbers are positive integers and end_line must be at least start_line.
+The reference must identify existing successful read_file evidence at the
+selected revision, and that evidence must actually contain every requested
+line. Do not use an advisory, diff, search hit, failed read or another revision.
+The controller copies the exact saved source lines; do not output file, line,
+code, or transcribe source text in a location. Keep desc concise, or use ''.
+If no valid already-read reference covers the location, leave its value
+unknown rather than inventing a reference or range. verify can only be integer
+0. Maximum 15 records, 24 evidence references per field, 32 trace locations;
+keep prose concise.
 For commit, explicitly choose revision_basis: behavior_at_revision means cited
 source establishes the behavior at that revision, affected_range_and_source
 also establishes its relation to the advisory affected range, inspected_only
@@ -74,9 +84,9 @@ def _array(item):
 
 
 def _location():
-    return _object({"file": _string(), "line": {"anyOf": [
-        _integer(1), _string(pattern=r"^[1-9][0-9]*(?:-[1-9][0-9]*)?$")]},
-        "code": _string(), "desc": _string()})
+    """Internal read reference; the pipeline expands the final public location."""
+    return _object({"evidence_ref": _string(pattern=r"^E[0-9]{4,8}$"),
+                    "start_line": _integer(1), "end_line": _integer(1), "desc": _string()})
 
 
 def _record(names, value_schema, has_value):
@@ -212,6 +222,12 @@ def normalize_step(value):
             raise ProtocolError()
         if name == "trace" and record["has_value"] and len(record["value"]) > 32:
             raise ProtocolError()
+        if name in {"entry_point", "critical_operation", "trace"} and record["has_value"]:
+            locations = record["value"] if name == "trace" else [record["value"]]
+            if any(location["end_line"] < location["start_line"] for location in locations):
+                raise ProtocolError()
+            # Evidence existence, read success, revision and source coverage
+            # require the pipeline's saved evidence, not this syntax validator.
         review = {key: copy.deepcopy(record[key]) for key in ("status", "reason", "evidence_refs")}
         if name == "commit":
             review["revision_basis"] = record["revision_basis"]
