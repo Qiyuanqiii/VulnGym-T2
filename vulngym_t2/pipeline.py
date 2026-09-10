@@ -97,6 +97,14 @@ and actual source evidence. Explicit input vulnerable_commit is also a claim to
 check, not permission to skip source inspection. Missing fixes do not prevent
 using available history/source and reporting useful partial fields. Do not
 silently substitute HEAD or a patch commit as the vulnerable revision.
+Descriptions and reasons are claims too: a verbatim location match does not
+validate its explanation. Keep inspected commit, its parents, and selected
+revision distinct in prose; never label a parent SHA as the fix SHA. State
+whether route prefixes, permissions, deployment conditions and affected ranges
+come from the advisory or from inspected source. Do not invent a full URL from
+a relative router declaration. Narrow or omit unsupported optional desc text;
+if the essential field itself is uncertain, downgrade it instead of just adding
+a disclaimer. Do not claim independent confirmation of advisory-only facts.
 Use supported only with a concise reason and cited evidence; it is your model
 assessment, not independent or human confirmation. Keep conjectures separately
 as suggested_value with uncertain/conflicting/missing status. Preserve supported
@@ -494,7 +502,7 @@ def produce(job, client, repo, max_calls=8, max_tool_calls=24):
                     "note": "Mechanical checks only, not proof of semantic correctness. Correct only from already read evidence; keep genuinely unknown fields unknown."}
         result["actions"].append({"action": "draft_validation", **feedback})
         messages.append({"role": "user", "content": _json({"draft_validation": feedback})})
-        messages.append({"role": "user", "content": "ONE bounded self-review: compare this draft with the already shown advisory/history/source evidence. Recheck vulnerable revision (not blindly the fix parent), exact code locations, reachability, and each field's evidence. Return action=draft only, with brief corrections or uncertainty. Omitted fields retain their prior status; explicitly mark any disputed field uncertain/conflicting with suggested_value. No tools. This is model self-review, not human validation."})
+        messages.append({"role": "user", "content": "ONE bounded self-review: compare this draft with the already shown advisory/history/source evidence. Recheck vulnerable revision (not blindly the fix parent), exact code locations, reachability, and each field's evidence. Also check desc and reason: keep fix/parent/selected SHA roles distinct, label advisory-only premises, and omit or narrow unsupported route/permission/impact claims. A byte match does not validate prose; downgrade an uncertain essential field. Return action=draft only, with brief corrections or uncertainty. Omitted fields retain their prior status; explicitly mark any disputed field uncertain/conflicting with suggested_value. No tools. This is model self-review, not human validation."})
         review_reply = complete("self_review")
         if review_reply is not None and review_reply.get("action") == "draft":
             merge_draft(review_reply)

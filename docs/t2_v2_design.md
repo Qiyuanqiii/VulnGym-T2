@@ -8,12 +8,12 @@
 
 ## 独立模块与数据流
 
-当前 `vulngym_t2` 包含 **16 个 Python 模块（计入三个包入口文件和离线 pending 工具）**，运行时只导入本包和标准库，不再导入旧 `vulngym_agent` 或 sealed/orchestrator 路径。有用的低层实现收进 `_vendor`，模型 HTTP 通信由本包 `transport` 承担；交付不依赖旧大工程的隐式导入链，也没有再搭一个 agent 框架。
+当前 `vulngym_t2` 包含 **17 个 Python 模块（计入三个包入口文件和离线辅助命令）**，运行时只导入本包和标准库，不再导入旧 `vulngym_agent` 或 sealed/orchestrator 路径。有用的低层实现收进 `_vendor`，模型 HTTP 通信由本包 `transport` 承担；交付不依赖旧大工程的隐式导入链，也没有再搭一个 agent 框架。
 
 | 模块组 | 文件与责任 |
 |---|---|
 | 输入与入口（5） | `__init__`、`__main__`、`cli`、`intake`、`pending`：参数、材料、批次调度与离线未开始清单。 |
-| 分析与产物（4） | `repository`、`pipeline`、`output`、`report`：读源码、模型循环、终检、离线自评。 |
+| 分析与产物（5） | `repository`、`pipeline`、`output`、`report`、`review_export`：读源码、模型循环、终检、离线自评与复核阅读材料。 |
 | 模型通信（2） | `llm`、`transport`：JSON 请求、用量与共享账本、停止状态。 |
 | 随包基础实现（5） | `_vendor/__init__`、`bounded_process`、`git_repository`、`models`、`schema_adapter`：受限进程、Git 对象与格式规则。 |
 
@@ -35,6 +35,8 @@
 模型有七种只读能力：`inspect_commit` 看提交及父节点，`list_files` 发现目录，`search_code` 搜索源码线索，`read_diff` 理解修改，`read_file` 取得指定版本的真实代码，`list_refs` 浏览已有本地 refs，`search_history` 按字面关键词搜索指定起点的提交说明。无明确 fix 时也能从版本和历史继续探索；历史命中只是线索，不能替代公告、差异和源码论证。源码、公告与提交说明都是数据，不能改变权限，也不会被执行。
 
 批次停止后的 `pending` 工具仅从原 URL 列表及终态 summary/review 核对已处理前缀，输出尚未开始的 URL。它不恢复模型状态、不自动重试失败项、不读密钥或账本。无法证明前缀时拒绝猜测；真正继续请求仍需用户授权。
+
+`review_export` 从已结束的 summary/entries/review 按 entry_id 生成独立 Markdown：字段、原模型判断、引用目录及空白人工复核栏。它不读取目标或模型、不改 verify、不把导出当成审批。描述文字也可能错误：已在 `docs/t2_case_notes.md` 保留具体勘误，并补入现有一次模型自查；提示改动不等于真实效果已验证。
 
 有些已提供的对象仓库包含 refs 和历史却没有有效 HEAD；`search_history` 不自动猜一个版本，需先 `list_refs` 后显式传入起点。这里的“起点”只是搜索范围，不等于漏洞 commit。
 
@@ -66,4 +68,4 @@
 
 效果报告应同时呈现输入可用性、完整与部分产物、具体语义疑点、耗时及 HTTP/token 用量。少量真实诊断只说明该次表现；自动汇总不应把未处理输入藏到分母外，也不能用调用数或输出长度替代质量结论。
 
-T1 集成与非空 trace 为可选扩展。详细命令、授权预算和故障处置见 `README.md`；演示及人工复核清单见 `docs/t2_v2_demo.md`。本短设计说明当前实现和取舍，不代替真实产物与独立质量评价。随库三页 PDF 是首次交付设计快照；本 Markdown 包含后续历史工具/pending 增量，新增功能还未真实模型复测。
+T1 集成与非空 trace 为可选扩展。详细命令、授权预算和故障处置见 `README.md`；演示及人工复核清单见 `docs/t2_v2_demo.md`。本短设计说明当前实现和取舍，不代替真实产物与独立质量评价。随库三页 PDF 是首次交付设计快照；本 Markdown 包含后续历史工具、离线辅助和描述自查增量，模型侧改动还未真实复测。

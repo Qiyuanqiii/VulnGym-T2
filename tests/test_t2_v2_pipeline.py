@@ -179,6 +179,10 @@ class PipelineTests(unittest.TestCase):
             return response
 
         def correct(messages):
+            review_instruction = messages[-1]["content"]
+            self.assertIn("check desc and reason", review_instruction)
+            self.assertIn("fix/parent/selected SHA roles", review_instruction)
+            self.assertIn("advisory-only premises", review_instruction)
             feedback = [json.loads(message["content"])["draft_validation"]
                         for message in messages if '"draft_validation":' in message["content"]][-1]
             self.assertTrue(any(item["field"] == "critical_operation" for item in feedback["errors"]))

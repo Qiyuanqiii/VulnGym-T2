@@ -6,6 +6,8 @@
 
 ## 演示前准备，不占五分钟
 
+**最快的无费用回放：** 在项目根目录执行 `python -m vulngym_t2.review_export --run-dir examples/run-03 --output review-complete.md`，另用 `examples/run-02` 导出 `review-failure.md`。打开两份 Markdown 即可按下述节奏展示，不必现场拼接 JSONL。输出需是新文件且在原运行目录之外。先看 `docs/t2_case_notes.md` 中的已发现勘误；复核包保留原模型措辞，不会自动修正旧产物。回放只展示已有结果，不是模型现场重跑、录屏视频或已完成的人工审核。
+
 使用无配置文件的 PowerShell（例如 `powershell -NoProfile`），切到包含完整 `vulngym_t2/` 的项目目录。建议使用 Python 3.13（实测 Windows / Python 3.13.12，未验证最低版本）和 `PATH` 中的 Git；运行路径只有标准库依赖，不必安装第三方 Python 包。准备 UTF-8 公告、包含相关历史的独立本地 clone 或 bare 仓库；程序不 clone/fetch，不支持 linked worktree、partial clone 或仓库外对象存储。
 
 五分钟是**展示时间，不包含模型等待时间**。严格限时可直接选择“已有结果回放”路线，准备一份已经结束的真实输出，说明运行时间和输入；若尚无真实输出，就现场展示准备检查、运行进度与限制，不预演成已成功完成。回放不冒称现场新运行，stub 不冒充真实模型结果；本稿也不表示已有录屏视频。

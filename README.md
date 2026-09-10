@@ -8,6 +8,17 @@
 
 状态：隔离实现已完成代表性真实开发运行。最近一次 GHSA URL 列表批次处理 3 份输入，导出 3 条完整候选，耗时 525.471 秒、18 次 HTTP；另一次批次因首条模型空白正文停止，失败和草稿也保留。**这不是盲测、总体准确率或导师验收通过的声明。** 逐项结果与质量边界见 `docs/t2_v2_results.md`；交付包同时包含真实结果、自评和失败示例。
 
+## 不用 key，先看真实结果
+
+在项目根目录运行以下命令，将已有真实结果整理成便于评审阅读的 Markdown。输出必须是尚不存在的新文件，且不能放进原运行目录；不会读取目标仓库、联网或修改原 JSONL。
+
+```powershell
+python -m vulngym_t2.review_export --run-dir examples/run-03 --output review-complete.md
+python -m vulngym_t2.review_export --run-dir examples/run-02 --output review-failure.md
+```
+
+打开生成的文件即可看批次统计、逐条字段、模型判断、引用目录和空白人工复核栏。`complete` 仍是自动完整候选，`verify=0` 不变；导出不是新的模型运行或人工批准。来源内容作文本显示，不是要执行的命令。最新[案例勘误](docs/t2_case_notes.md)已记录一处修复/父提交角色文字错误及描述超出所引证据的情况；读旧样例时应同时查看，不能只展示成功数量。
+
 ## 运行前
 
 建议使用 Python 3.13（当前实测为 Windows / Python 3.13.12），以及已加入 `PATH` 的 Git；未单独验证最低可用 Python 版本。独立运行路径只使用 Python 标准库，**不需要 pip 安装第三方包，也不需要旧 `vulngym_agent` 包**。保留完整 `vulngym_t2/` 目录（包括 `_vendor/` 和 `transport.py`），在其上一级、本项目根目录运行命令；不要只拷贝 `cli.py`。

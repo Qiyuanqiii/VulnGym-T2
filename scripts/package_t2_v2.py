@@ -9,9 +9,9 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULES = ("__init__", "__main__", "cli", "intake", "llm", "output", "pending", "pipeline", "repository", "report", "transport")
+MODULES = ("__init__", "__main__", "cli", "intake", "llm", "output", "pending", "pipeline", "repository", "report", "review_export", "transport")
 VENDOR = ("__init__", "bounded_process", "git_repository", "models", "schema_adapter")
-DOCS = ("t2_v2_design", "t2_v2_demo", "t2_v2_packaging", "t2_v2_iteration_history", "t2_v2_results", "t2_goals")
+DOCS = ("t2_v2_design", "t2_v2_demo", "t2_v2_packaging", "t2_v2_iteration_history", "t2_v2_results", "t2_goals", "t2_case_notes")
 PUBLIC_RESULTS = ("entries.jsonl", "reports.jsonl", "review.jsonl", "actions.jsonl", "summary.json", "assessment.md")
 PUBLIC_INPUT_FILES = (
     "README.md", "urls.txt", "repo-map.example.json",
@@ -73,7 +73,7 @@ def build(destination: Path, example_runs: list[Path], design_pdf: Path | None =
             archive.writestr(name, data)
         archive.writestr("tests/__init__.py", "")
         archive.writestr(".gitignore", "__pycache__/\n*.py[cod]\n.env\n.env.*\nruns/\n*.lock\nrequests.jsonl\n")
-        archive.writestr("DELIVERY.json", json.dumps({"product": "VulnGym T2 v2", "runtime": "Python standard library + Git; no third-party Python packages", "packaging_python": sys.version.split()[0], "runtime_source_files": sorted(name for name in sources if name.startswith("vulngym_t2/")), "source_files": len(sources), "example_runs": len(example_runs), "human_verified": False, "evaluation_note": "Examples preserve their actual completed/error/draft status. They are development runs, not blind accuracy measurements."}, ensure_ascii=False, indent=2))
+        archive.writestr("DELIVERY.json", json.dumps({"product": "VulnGym T2 v2", "runtime": "Python standard library + Git; no third-party Python packages", "packaging_python": sys.version.split()[0], "runtime_source_files": sorted(name for name in sources if name.startswith("vulngym_t2/")), "source_files": len(sources), "example_runs": len(example_runs), "human_verified": False, "evaluation_note": "Examples preserve their actual completed/error/draft status. They are development runs, not blind accuracy measurements. Later history tools and revised prose-review prompts have no new real-model evaluation yet. Offline pending/review exports do not change model or human verification status. See docs/t2_case_notes.md for known narrative corrections; docs/T2-design.pdf is the initial delivery snapshot."}, ensure_ascii=False, indent=2))
     return {"status": "packaged", "files": len(sources) + 3, "uncompressed_bytes": total,
             "archive_bytes": destination.stat().st_size, "example_runs": len(example_runs)}
 
