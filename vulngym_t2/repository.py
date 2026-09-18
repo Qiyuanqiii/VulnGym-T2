@@ -95,6 +95,28 @@ def _code(error: Exception) -> str:
     return "repository_unavailable"
 
 
+_SAFE_ERROR_CODES = frozenset({
+    "binary_source", "code_not_verbatim_at_commit", "commit_unavailable",
+    "git_history_response_invalid", "git_refs_response_invalid", "git_search_failed",
+    "git_search_response_invalid", "git_timeout", "git_output_limit", "git_object_unavailable",
+    "invalid_commit_ref", "invalid_location", "invalid_location_code", "invalid_location_line",
+    "invalid_ref_prefix", "invalid_repo_path", "invalid_search_query", "invalid_tool_argument",
+    "line_out_of_range", "non_utf8_repo_path", "non_utf8_source", "repository_unavailable",
+    "search_path_argument_limit", "source_file_unavailable", "unknown_tool",
+})
+
+
+def safe_error_code(error: Exception) -> str:
+    """Expose only known reader codes, never raw paths or subprocess stderr."""
+    if isinstance(error, GitFactError):
+        return _code(error)
+    if isinstance(error, ValueError) and len(error.args) == 1:
+        value = error.args[0]
+        if isinstance(value, str) and value in _SAFE_ERROR_CODES:
+            return value
+    return "repository_read_failed"
+
+
 class RepoReader:
     """Read one explicitly supplied local repository without checkout or network."""
 
@@ -427,7 +449,7 @@ class RepoReader:
         if prefixes is not None and sum(len(item) + 1 for item in prefixes) > 20000:
             raise ValueError("search_path_argument_limit")
         all_paths = self._files(commit)
-        skipped: list[dict[str, str]] = []
+        skipped: list[dict[str, Any]] = []
         if prefixes is None:
             candidates = all_paths
         else:
@@ -440,6 +462,7 @@ class RepoReader:
             candidates = sorted(set(candidates))
         matches: list[dict[str, Any]] = []
         chars = 0
+        processed_matches = 0
         truncated = False
         raw = b""
         if candidates:
@@ -459,6 +482,12 @@ class RepoReader:
         for record in raw.split(b"\n"):
             if not record:
                 continue
+            # Omitted/undecodable lines still consume the original match cap;
+            # skipping a huge line must not permit an unbounded further scan.
+            if processed_matches >= MAX_MATCHES:
+                truncated = True
+                break
+            processed_matches += 1
             try:
                 header, raw_number, raw_code = record.split(b"\0", 2)
                 prefix = (commit + ":").encode("ascii")
@@ -475,14 +504,19 @@ class RepoReader:
             except UnicodeError:
                 skipped.append({"path": path, "error": "non_utf8_source"})
                 continue
-            if len(matches) >= MAX_MATCHES or chars + len(code) > MAX_TEXT_CHARS:
+            if chars + len(code) > MAX_TEXT_CHARS:
                 truncated = True
-                break
+                # Preserve the observed coordinate, not a fabricated snippet.
+                # A single large matching line must not hide later short hits
+                # already present within the same bounded search transport.
+                skipped.append({"path": path, "line": number,
+                                "error": "matched_line_display_limit", "omitted_chars": len(code)})
+                continue
             matches.append({"file": path, "line": number, "code": code})
             chars += len(code)
         # -m is per file, so reaching the presentation cap is conservatively
         # incomplete even if no extra matching record was captured.
-        truncated = truncated or len(matches) >= MAX_MATCHES
+        truncated = truncated or processed_matches >= MAX_MATCHES
         return {"commit": commit, "query": query, "matches": matches,
                 "scanned_files": len(candidates), "candidate_files": len(candidates),
                 "paths": prefixes,

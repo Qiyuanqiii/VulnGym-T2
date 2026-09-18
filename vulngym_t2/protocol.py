@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 
 STRICT_TOOL_NAME = "submit_step"
@@ -52,11 +53,44 @@ additional calls during a draft-only or self-review turn.
 """
 
 
+_PROTOCOL_REASONS = frozenset({
+    "schema_mismatch", "expected_object", "expected_array", "expected_string",
+    "expected_integer", "expected_boolean", "missing_property", "unexpected_properties",
+    "enum_mismatch", "pattern_mismatch", "numeric_range", "union_mismatch",
+    "json_node_limit", "json_depth_limit", "string_limit", "object_key_limit",
+    "array_limit", "unsupported_value_type", "json_bytes_limit", "calls_limit",
+    "records_limit", "plan_limit", "summary_limit", "tools_calls_required",
+    "tools_records_forbidden", "tools_summary_forbidden", "blank_argument",
+    "draft_calls_forbidden", "draft_plan_forbidden", "duplicate_record", "reason_limit",
+    "evidence_refs_limit", "evidence_ref_invalid", "revision_basis_noncommit",
+    "supported_without_value", "trace_limit", "location_range_invalid",
+})
+_DIAGNOSTIC_PATH = re.compile(r"\$(?:\.(?:action|plan|calls|records|summary|tool|arguments|"
+    r"name|has_value|value|status|reason|evidence_refs|revision_basis|commit|prefix|limit|"
+    r"query|path|offset|start_line|end_line|paths|before|after|evidence_ref|desc)|\[[0-9]{1,5}\])*")
+
+
+def is_safe_diagnostic_item(name, value):
+    """Only fixed reason codes and schema-property/index paths may cross out."""
+    if not isinstance(value, str):
+        return False
+    if name == "protocol_reason":
+        return value in _PROTOCOL_REASONS
+    if name == "protocol_path":
+        return len(value) <= 200 and _DIAGNOSTIC_PATH.fullmatch(value) is not None
+    return False
+
+
 class ProtocolError(ValueError):
     error_code = "deepseek_strict_protocol_invalid"
 
-    def __init__(self):
+    def __init__(self, reason="schema_mismatch", path="$"):
         super().__init__(self.error_code)
+        self.diagnostic = {
+            "phase": "validate_submit_step",
+            "protocol_reason": reason if is_safe_diagnostic_item("protocol_reason", reason) else "schema_mismatch",
+            "protocol_path": path if is_safe_diagnostic_item("protocol_path", path) else "$",
+        }
 
 
 def _object(properties):
@@ -89,12 +123,12 @@ def _location():
                     "start_line": _integer(1), "end_line": _integer(1), "desc": _string()})
 
 
-def _record(names, value_schema, has_value):
+def _record(names, value_schema, has_value, *, revision_bases=("unknown",)):
     return _object({"name": _string(enum=names),
                     "has_value": {"type": "boolean", "enum": [has_value]},
                     "value": value_schema, "status": _string(enum=STATUSES),
                     "reason": _string(), "evidence_refs": _array(_string()),
-                    "revision_basis": _string(enum=REVISION_BASES)})
+                    "revision_basis": _string(enum=revision_bases)})
 
 
 def _schema():
@@ -110,9 +144,11 @@ def _schema():
     calls = {"anyOf": [_object({"tool": _string(enum=[name]), "arguments": _object(args)})
                        for name, args in arguments.items()]}
     text_fields = [name for name in ENTRY_FIELDS if name not in {
-        "vuln_ids", "entry_point", "critical_operation", "trace", "verify"}]
+        "commit", "vuln_ids", "entry_point", "critical_operation", "trace", "verify"}]
     records = {"anyOf": [
-        _record(ENTRY_FIELDS, _string(enum=[""]), False),
+        _record(["commit"], _string(enum=[""]), False, revision_bases=REVISION_BASES),
+        _record([name for name in ENTRY_FIELDS if name != "commit"], _string(enum=[""]), False),
+        _record(["commit"], _string(), True, revision_bases=REVISION_BASES),
         _record(text_fields, _string(), True),
         _record(["vuln_ids"], _array(_string()), True),
         _record(["entry_point", "critical_operation"], _location(), True),
@@ -131,32 +167,43 @@ def strict_tool_definition():
         "parameters": _schema()}}
 
 
-def _bounded(value):
+def _bounded(value, *, allow_json_scalars=False):
+    """Enforce resource bounds before schema checks, without coercing values.
+
+    Staged annotations isolate null/finite-number type errors per field. The
+    legacy strict record contract continues rejecting these scalars globally.
+    """
     nodes = 0
 
     def visit(item, depth):
         nonlocal nodes
         nodes += 1
         if nodes > 10_000 or depth > 16:
-            raise ProtocolError()
+            raise ProtocolError("json_node_limit" if nodes > 10_000 else "json_depth_limit")
         if isinstance(item, str):
             if len(item) > 32_000:
-                raise ProtocolError()
+                raise ProtocolError("string_limit")
         elif isinstance(item, dict):
             if any(not isinstance(key, str) or len(key) > 64 for key in item):
-                raise ProtocolError()
+                raise ProtocolError("object_key_limit")
             for child in item.values():
                 visit(child, depth + 1)
         elif isinstance(item, list):
             if len(item) > 64:
-                raise ProtocolError()
+                raise ProtocolError("array_limit")
             for child in item:
                 visit(child, depth + 1)
+        elif allow_json_scalars and (item is None or type(item) is float and math.isfinite(item)):
+            pass
         elif type(item) not in (bool, int):
-            raise ProtocolError()
+            raise ProtocolError("unsupported_value_type")
     visit(value, 0)
-    if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 1_048_576:
-        raise ProtocolError()
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (ValueError, UnicodeError):
+        raise ProtocolError("unsupported_value_type") from None
+    if len(encoded) > 1_048_576:
+        raise ProtocolError("json_bytes_limit")
 
 
 def _matches(value, schema):
@@ -180,20 +227,92 @@ def _matches(value, schema):
     return valid and ("enum" not in schema or value in schema["enum"])
 
 
+def _schema_error(value, schema, path="$"):
+    """Explain an existing rejection; never determine whether to accept it.
+
+    Paths use schema-owned property names, never keys copied from the answer.
+    Known discriminators select an anyOf branch, but their values are not logged.
+    """
+    if _matches(value, schema):
+        return None
+    if "anyOf" in schema:
+        candidates = schema["anyOf"]
+        if not isinstance(value, dict):
+            return "union_mismatch", path
+        selected = False
+        for discriminator in ("tool", "name", "has_value"):
+            tagged = [choice for choice in candidates
+                      if "enum" in choice.get("properties", {}).get(discriminator, {})]
+            if not tagged or len(tagged) != len(candidates):
+                continue
+            if discriminator not in value:
+                return "missing_property", path + "." + discriminator
+            matches = [choice for choice in tagged if _matches(
+                value[discriminator], choice["properties"][discriminator])]
+            if not matches:
+                tag_schema = dict(tagged[0]["properties"][discriminator])
+                tag_schema["enum"] = [item for choice in tagged
+                                      for item in choice["properties"][discriminator]["enum"]]
+                return _schema_error(value[discriminator], tag_schema, path + "." + discriminator)
+            candidates, selected = matches, True
+        return _schema_error(value, candidates[0], path) if selected else ("union_mismatch", path)
+    kind = schema["type"]
+    if kind == "object":
+        if not isinstance(value, dict):
+            return "expected_object", path
+        for key in schema["properties"]:
+            if key not in value:
+                return "missing_property", path + "." + key
+        if set(value) - set(schema["properties"]):
+            return "unexpected_properties", path
+        for key, child in schema["properties"].items():
+            error = _schema_error(value[key], child, path + "." + key)
+            if error is not None:
+                return error
+    elif kind == "array":
+        if not isinstance(value, list):
+            return "expected_array", path
+        for index, item in enumerate(value):
+            error = _schema_error(item, schema["items"], path + f"[{index}]")
+            if error is not None:
+                return error
+    elif kind == "string":
+        if not isinstance(value, str):
+            return "expected_string", path
+        if "pattern" in schema and re.fullmatch(schema["pattern"], value) is None:
+            return "pattern_mismatch", path
+    elif kind == "integer":
+        if type(value) is not int:
+            return "expected_integer", path
+        if not schema.get("minimum", value) <= value <= schema.get("maximum", value):
+            return "numeric_range", path
+    elif kind == "boolean" and type(value) is not bool:
+        return "expected_boolean", path
+    if "enum" in schema and value not in schema["enum"]:
+        return "enum_mismatch", path
+    return "schema_mismatch", path
+
+
 def normalize_step(value):
     """Validate, then normalize a typed answer without filling unknown values."""
     _bounded(value)
-    if not _matches(value, _schema()):
-        raise ProtocolError()
+    schema = _schema()
+    if not _matches(value, schema):
+        raise ProtocolError(*(_schema_error(value, schema) or ("schema_mismatch", "$")))
     if len(value["calls"]) > 6 or len(value["records"]) > 15:
-        raise ProtocolError()
+        raise ProtocolError("calls_limit" if len(value["calls"]) > 6 else "records_limit",
+                            "$.calls" if len(value["calls"]) > 6 else "$.records")
     if len(value["plan"]) > 500 or len(value["summary"]) > 1000:
-        raise ProtocolError()
+        raise ProtocolError("plan_limit" if len(value["plan"]) > 500 else "summary_limit",
+                            "$.plan" if len(value["plan"]) > 500 else "$.summary")
     if value["action"] == "tools":
         if not value["calls"] or value["records"] or value["summary"]:
-            raise ProtocolError()
+            reason, path = (("tools_calls_required", "$.calls") if not value["calls"] else
+                            ("tools_records_forbidden", "$.records") if value["records"] else
+                            ("tools_summary_forbidden", "$.summary"))
+            raise ProtocolError(reason, path)
         calls = copy.deepcopy(value["calls"])
-        for call in calls:
+        for call_index, call in enumerate(calls):
             args, tool = call["arguments"], call["tool"]
             optional_strings = ({"list_refs": ("prefix",), "list_files": ("prefix",),
                                  "search_history": ("path",), "read_diff": ("path",)}).get(tool, ())
@@ -204,28 +323,42 @@ def normalize_step(value):
                 del args["end_line"]
             if tool == "search_code" and args["paths"] == []:
                 del args["paths"]
-            if any(not args[key].strip() for key in ("commit", "before", "after", "query") if key in args):
-                raise ProtocolError()
+            for key in ("commit", "before", "after", "query"):
+                if key in args and not args[key].strip():
+                    raise ProtocolError("blank_argument", f"$.calls[{call_index}].arguments.{key}")
+            if tool == "read_file":
+                if not args["path"].strip():
+                    raise ProtocolError("blank_argument", f"$.calls[{call_index}].arguments.path")
+                if "end_line" in args and args["end_line"] < args["start_line"]:
+                    raise ProtocolError("numeric_range", f"$.calls[{call_index}].arguments.end_line")
         return {"action": "tools", "plan": value["plan"], "calls": calls}
     if value["calls"] or value["plan"]:
-        raise ProtocolError()
+        raise ProtocolError("draft_calls_forbidden" if value["calls"] else "draft_plan_forbidden",
+                            "$.calls" if value["calls"] else "$.plan")
     fields, reviews = {}, {}
-    for record in value["records"]:
+    for record_index, record in enumerate(value["records"]):
+        record_path = f"$.records[{record_index}]"
         name = record["name"]
         if name in reviews or len(record["reason"]) > 2000 or len(record["evidence_refs"]) > 24:
-            raise ProtocolError()
-        if any(re.fullmatch(r"E[0-9]{4,8}", ref) is None for ref in record["evidence_refs"]):
-            raise ProtocolError()
+            reason, path = (("duplicate_record", ".name") if name in reviews else
+                            ("reason_limit", ".reason") if len(record["reason"]) > 2000 else
+                            ("evidence_refs_limit", ".evidence_refs"))
+            raise ProtocolError(reason, record_path + path)
+        for ref_index, ref in enumerate(record["evidence_refs"]):
+            if re.fullmatch(r"E[0-9]{4,8}", ref) is None:
+                raise ProtocolError("evidence_ref_invalid", record_path + f".evidence_refs[{ref_index}]")
         if name != "commit" and record["revision_basis"] != "unknown":
-            raise ProtocolError()
+            raise ProtocolError("revision_basis_noncommit", record_path + ".revision_basis")
         if record["status"] == "supported" and not record["has_value"]:
-            raise ProtocolError()
+            raise ProtocolError("supported_without_value", record_path + ".has_value")
         if name == "trace" and record["has_value"] and len(record["value"]) > 32:
-            raise ProtocolError()
+            raise ProtocolError("trace_limit", record_path + ".value")
         if name in {"entry_point", "critical_operation", "trace"} and record["has_value"]:
             locations = record["value"] if name == "trace" else [record["value"]]
-            if any(location["end_line"] < location["start_line"] for location in locations):
-                raise ProtocolError()
+            for location_index, location in enumerate(locations):
+                if location["end_line"] < location["start_line"]:
+                    path = record_path + ".value" + (f"[{location_index}]" if name == "trace" else "")
+                    raise ProtocolError("location_range_invalid", path + ".end_line")
             # Evidence existence, read success, revision and source coverage
             # require the pipeline's saved evidence, not this syntax validator.
         review = {key: copy.deepcopy(record[key]) for key in ("status", "reason", "evidence_refs")}

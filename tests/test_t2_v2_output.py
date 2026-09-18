@@ -265,6 +265,9 @@ class T2V2OutputTests(unittest.TestCase):
             self.assertEqual(report["vuln_title"], "Command injection")
             self.assertEqual(report["num_entries"], 2)
             self.assertEqual(report["vuln_ids"], ["CVE-2026-12345", "CVE-2026-54321", REPORT])
+            self.assertEqual(summary["report_conflict_count"], 0)
+            self.assertEqual(summary["report_conflict_entry_count"], 0)
+            self.assertEqual((output / "report_conflicts.jsonl").read_text(encoding="utf-8"), "")
             self.assertEqual(len((output / "review.jsonl").read_text(encoding="utf-8").splitlines()), 4)
             all_text = "\n".join(path.read_text(encoding="utf-8") for path in output.iterdir())
             for private in ("sk-test-secret123456", "private-key", "hidden raw thought", "D:\\\\private", "repo_path"):
@@ -292,6 +295,52 @@ class T2V2OutputTests(unittest.TestCase):
         feedback = next(action for action in actions if action["action"] == "draft_validation")
         self.assertEqual(feedback["errors"][0]["code"], "source_not_read")
         self.assertEqual(feedback["note"], "Mechanical checks only.")
+
+
+    def test_report_metadata_conflicts_preserve_entries_and_canonical_aggregates(self):
+        with tempfile.TemporaryDirectory(prefix="t2-report-conflict-", dir=ROOT.parent) as temp:
+            writer = BatchWriter(Path(temp) / "output")
+            for index in range(1, 5):
+                current_job, result = fixture(f"entry-{index:05d}")
+                if index == 4:
+                    current_job.update(report_id="GHSA-2222-3333-4444",
+                                       source_link="https://github.com/advisories/GHSA-2222-3333-4444")
+                    result["fields"]["vuln_ids"] = [current_job["report_id"]]
+                finalized = finalize_result(current_job, result, StubRepoReader())
+                self.assertIsNotNone(finalized["entry"])
+                if index == 3:
+                    # The aggregator receives already complete synthetic records
+                    # from distinct source/version assessments; do not run targets.
+                    for field, value in {"commit": "b" * 40,
+                                         "repo_url": "https://github.com/example/other",
+                                         "project": "other", "vuln_title": "Different finding"}.items():
+                        finalized["entry"][field] = value
+                        finalized["review"]["draft_fields"][field] = value
+                writer.record(current_job, finalized)
+            summary = writer.finish()
+            self.assertEqual(summary["entry_count"], 4)
+            self.assertEqual(summary["candidate_count"], 4)
+            self.assertEqual(summary["report_count"], 2)
+            self.assertTrue(summary["report_linkage_complete"])
+            self.assertEqual(summary["report_conflict_count"], 1)
+            self.assertEqual(summary["report_conflict_entry_count"], 3)
+            self.assertIn("report_conflicts.jsonl", summary["files"])
+            self.assertEqual(len((writer.directory / "entries.jsonl").read_text(encoding="utf-8").splitlines()), 4)
+            self.assertEqual(len((writer.directory / "review.jsonl").read_text(encoding="utf-8").splitlines()), 4)
+            reports = [json.loads(line) for line in (writer.directory / "reports.jsonl").read_text(encoding="utf-8").splitlines()]
+            report = next(row for row in reports if row["report_id"] == REPORT)
+            self.assertEqual(report["entry_ids"], ["entry-00001", "entry-00002", "entry-00003"])
+            self.assertEqual(report["commit"], COMMIT)
+            self.assertEqual(report["vuln_title"], "Command injection")
+            conflict = json.loads((writer.directory / "report_conflicts.jsonl").read_text(encoding="utf-8"))
+            self.assertEqual(conflict["report_id"], REPORT)
+            self.assertEqual(conflict["status"], "conflicting")
+            self.assertEqual(conflict["entry_ids"], ["entry-00001", "entry-00002", "entry-00003"])
+            self.assertEqual(set(conflict["conflicts"]), {"commit", "repo_url", "project", "vuln_title"})
+            self.assertEqual(conflict["conflicts"]["commit"], [
+                {"value": COMMIT, "entry_ids": ["entry-00001", "entry-00002"]},
+                {"value": "b" * 40, "entry_ids": ["entry-00003"]},
+            ])
 
 
 if __name__ == "__main__":

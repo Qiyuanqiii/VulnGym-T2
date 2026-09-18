@@ -34,6 +34,112 @@ def tool_envelope(value=None, *, arguments=None, model="deepseek-v4-pro"):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_read_batch_rejects_a_bad_later_range_or_blank_path_before_returning_calls(self):
+        valid = {"tool": "inspect_commit", "arguments": {"commit": "a" * 40}}
+        for path, start, end, reason, suffix in (("", 1, 0, "blank_argument", "path"),
+                (" ", 1, 2, "blank_argument", "path"),
+                ("handler.py", 3, 2, "numeric_range", "end_line")):
+            value = step(calls=[valid, {"tool": "read_file", "arguments": {
+                "commit": "a" * 40, "path": path, "start_line": start, "end_line": end}}])
+            with self.subTest(suffix=suffix), self.assertRaises(protocol.ProtocolError) as caught:
+                protocol.normalize_step(value)
+            self.assertEqual(caught.exception.diagnostic["protocol_reason"], reason)
+            self.assertEqual(caught.exception.diagnostic["protocol_path"], "$.calls[1].arguments." + suffix)
+        default = step(calls=[{"tool": "read_file", "arguments": {
+            "commit": "a" * 40, "path": "handler.py", "start_line": 3, "end_line": 0}}])
+        self.assertNotIn("end_line", protocol.normalize_step(default)["calls"][0]["arguments"])
+
+    def test_bounded_scalar_opt_in_does_not_change_legacy_schema_or_leak_encode_errors(self):
+        for scalar in (None, 1.5):
+            with self.subTest(scalar=scalar):
+                protocol._bounded({"value": scalar}, allow_json_scalars=True)
+                with self.assertRaises(protocol.ProtocolError):
+                    protocol._bounded({"value": scalar})
+        for scalar in (float("nan"), float("inf"), "\ud800", 10 ** 5000):
+            with self.subTest(kind=type(scalar).__name__), self.assertRaises(protocol.ProtocolError) as caught:
+                protocol._bounded({"value": scalar}, allow_json_scalars=True)
+            self.assertEqual(caught.exception.diagnostic["protocol_reason"], "unsupported_value_type")
+
+    def test_revision_basis_schema_matches_local_semantics_with_and_without_values(self):
+        schema = protocol.strict_tool_definition()["function"]["parameters"]
+        values = {name: "value" for name in ENTRY_FIELDS}
+        values.update(commit="a" * 40, vuln_ids=[], entry_point=location_ref(),
+                      critical_operation=location_ref(), trace=[], verify=0)
+        for name in ENTRY_FIELDS:
+            for has_value in (False, True):
+                for basis in protocol.REVISION_BASES:
+                    item = record(name, values[name] if has_value else "", has_value=has_value, status="missing")
+                    item["revision_basis"] = basis
+                    value = step([item])
+                    accepted = name == "commit" or basis == "unknown"
+                    with self.subTest(name=name, has_value=has_value, basis=basis):
+                        self.assertEqual(protocol._matches(value, schema), accepted)
+                        if accepted:
+                            normalized = protocol.normalize_step(value)
+                            self.assertEqual(normalized["field_reviews"][name]["status"], "missing")
+                        else:
+                            with self.assertRaises(protocol.ProtocolError):
+                                protocol.normalize_step(value)
+
+    def test_structural_diagnostics_select_known_branches_without_model_text(self):
+        private = "PRIVATE_MODEL_TEXT"
+        missing = step([record()])
+        del missing["records"][0]["value"]
+        wrong_line = step([record("entry_point", location_ref(end_line="private-line"))])
+        unexpected = step(calls=[{"tool": "inspect_commit", "arguments": {"commit": "a" * 40, private: private}}])
+        cases = [
+            (missing, "missing_property", "$.records[0].value"),
+            (wrong_line, "expected_integer", "$.records[0].value.end_line"),
+            (unexpected, "unexpected_properties", "$.calls[0].arguments"),
+            (step([record(private, private)]), "enum_mismatch", "$.records[0].name"),
+            (step(calls=[{"tool": private, "arguments": {}}]), "enum_mismatch", "$.calls[0].tool"),
+            (step([record("entry_point", location_ref(evidence_ref=private))]), "pattern_mismatch", "$.records[0].value.evidence_ref"),
+        ]
+        for value, reason, path in cases:
+            with self.subTest(reason=reason, path=path), self.assertRaises(protocol.ProtocolError) as caught:
+                protocol.normalize_step(value)
+            self.assertEqual(caught.exception.diagnostic, {"phase": "validate_submit_step",
+                             "protocol_reason": reason, "protocol_path": path})
+            self.assertEqual(str(caught.exception), "deepseek_strict_protocol_invalid")
+            self.assertNotIn(private, json.dumps(caught.exception.diagnostic))
+            self.assertNotIn("private-line", json.dumps(caught.exception.diagnostic))
+
+    def test_bounds_and_semantic_diagnostics_are_fixed_codes_and_index_paths(self):
+        invalid_ref = step([record()])
+        invalid_ref["records"][0]["evidence_refs"] = ["PRIVATE_VALUE"]
+        long_reason = step([record()])
+        long_reason["records"][0]["reason"] = "PRIVATE_VALUE" * 200
+        cases = [
+            (step([record(), record()]), "duplicate_record", "$.records[1].name"),
+            (step([record("trace", [location_ref(start_line=3, end_line=2)])]),
+             "location_range_invalid", "$.records[0].value[0].end_line"),
+            (step([record("commit", "", has_value=False)]), "supported_without_value", "$.records[0].has_value"),
+            (step(calls=[{"tool": "inspect_commit", "arguments": {"commit": " "}}]),
+             "blank_argument", "$.calls[0].arguments.commit"),
+            (invalid_ref, "evidence_ref_invalid", "$.records[0].evidence_refs[0]"),
+            (long_reason, "reason_limit", "$.records[0].reason"),
+            (step([record("vuln_title", "PRIVATE_VALUE" * 3000)]), "string_limit", "$"),
+            (step(calls=[]), "tools_calls_required", "$.calls"),
+        ]
+        for value, reason, path in cases:
+            with self.subTest(reason=reason), self.assertRaises(protocol.ProtocolError) as caught:
+                protocol.normalize_step(value)
+            self.assertEqual(caught.exception.diagnostic["protocol_reason"], reason)
+            self.assertEqual(caught.exception.diagnostic["protocol_path"], path)
+            self.assertNotIn("PRIVATE_VALUE", json.dumps(caught.exception.diagnostic))
+
+    def test_diagnostic_inputs_are_sanitized_and_schema_explanation_does_not_validate(self):
+        error = protocol.ProtocolError("PRIVATE_REASON", "$.records[0].PRIVATE_PROPERTY")
+        self.assertEqual(error.diagnostic, {"phase": "validate_submit_step", "protocol_reason": "schema_mismatch", "protocol_path": "$"})
+        self.assertFalse(protocol.is_safe_diagnostic_item("protocol_reason", "PRIVATE_REASON"))
+        self.assertFalse(protocol.is_safe_diagnostic_item("protocol_path", "$.PRIVATE_PROPERTY"))
+        self.assertTrue(protocol.is_safe_diagnostic_item("protocol_path", "$.records[0].value[1].end_line"))
+        schema = protocol.strict_tool_definition()["function"]["parameters"]
+        valid = step([record("entry_point", location_ref()), record()])
+        self.assertIsNone(protocol._schema_error(valid, schema))
+        self.assertTrue(protocol._matches(valid, schema))
+        self.assertEqual(protocol.normalize_step(valid)["fields"]["entry_point"], location_ref())
+
     def test_schema_is_fresh_strict_and_uses_only_supported_vocabulary(self):
         definition = protocol.strict_tool_definition()
         self.assertEqual(definition["function"]["name"], "submit_step")

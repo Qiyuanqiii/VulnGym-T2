@@ -78,7 +78,7 @@ def evidence_from(messages):
             continue
         if not isinstance(body, dict):
             continue
-        for item in body.get("evidence", []) + body.get("tool_results", []):
+        for item in body.get("evidence", []) + body.get("tool_results", []) + body.get("additional_shared_evidence", []):
             if isinstance(item, dict) and item.get("id"):
                 records[item["id"]] = item
     return list(records.values())

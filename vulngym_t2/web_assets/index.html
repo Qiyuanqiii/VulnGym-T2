@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="t2-session" content="__SESSION_TOKEN__">
+  <title>VulnGym T2 · 提取工作台</title>
+  <link rel="preload" href="/fonts/jetbrains-mono-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/app.css"><script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"></div><a class="skip-link" href="#workspace">跳到工作区</a>
+  <header class="topbar glass">
+    <div class="brand"><img src="/brand/vulngym.png" alt="VulnGym" width="156" height="34"><span class="brand-divider"></span><h1>T2 <span>提取工作台</span></h1></div>
+    <div class="topbar-actions">
+      <div class="connection-status"><span id="connection" class="connection" role="status">连接中</span><span id="network-mode" class="network-mode" title="启动时确定，仅影响公告和源码下载，不改变模型请求的联网方式。">当前资料联网：系统默认</span></div>
+      <details class="quota"><summary><span id="budget-prefix">请求 </span><b id="budget">…</b></summary><div class="popover"><p id="budget-detail"></p><p id="budget-hint" class="hint">所有批次共用额度；金额以模型平台为准。</p></div></details>
+      <button id="theme-toggle" class="icon-button" type="button" aria-label="切换到深色外观" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20.3 15.5A8.6 8.6 0 0 1 8.5 3.7a8.6 8.6 0 1 0 11.8 11.8Z"/></svg><span id="theme-label" class="sr-only">深色</span></button>
+    </div>
+  </header>
+  <main>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div id="active-banner" class="active-banner" hidden><span id="active-text"></span><button id="show-active" type="button">查看当前任务</button><button id="stop" type="button">完成当前条目后停止</button><span id="stop-note" class="hint">当前条目仍可能调用模型，完成后保存结果。</span></div>
+    <div class="workspace" id="workspace" tabindex="-1">
+      <aside class="panel queue-panel glass" aria-labelledby="queue-heading">
+        <div class="panel-heading"><h2 id="queue-heading">批次与条目</h2><button id="new-run" type="button" class="primary" aria-describedby="intake-hint">＋ 添加资料并提取</button><p id="intake-hint" class="intake-hint">一次粘贴多个链接 / 正文 / 文件</p></div>
+        <div class="batch-summary">
+          <label for="run-select" class="sr-only">选择批次</label><select id="run-select"><option value="">还没有批次</option></select>
+          <div class="status-line"><span id="state-badge" class="pill">未开始</span><span id="case-count" class="muted">0 条结果</span></div>
+          <h3 id="run-title">先添加一份资料</h3><p id="run-subtitle" class="hint">检查输入免费；调用模型前需单独确认。</p><progress id="progress" value="0" max="1" aria-label="已处理资料"></progress>
+          <details id="candidate-coverage" class="candidate-coverage hint" hidden><summary id="candidate-coverage-summary">候选提案覆盖：未记录</summary><div id="candidate-coverage-detail"></div></details>
+          <label for="case-search" class="sr-only">搜索条目</label><input id="case-search" type="search" placeholder="搜索项目、标题或公告编号" autocomplete="off">
+          <label for="case-filter" class="sr-only">按条目状态筛选</label><select id="case-filter"><option value="all">全部条目</option><option value="complete">字段已齐 · 待确认</option><option value="draft">信息不全 · 待补充</option></select>
+        </div>
+        <div id="cases" class="case-list"><p class="empty-small">提取完成后，这里会列出条目。</p></div>
+        <div class="batch-details"><details><summary>输入检查与运行记录</summary><div id="input-checks" class="input-checks"></div><ol id="events" class="events"></ol><p id="output-path" class="hint path"></p></details></div>
+      </aside>
+      <section id="review-panel" class="panel evidence-panel glass" aria-labelledby="evidence-heading">
+        <div id="review-toolbar" class="review-toolbar"><div><h2 id="evidence-heading">结果复核</h2><details class="review-notice"><summary>模型结果 · 待人工确认</summary><p>“找到依据”是模型判断，不代表审核通过。此处只读查看，不会修改原结果或审核状态。</p></details><button id="back-to-field" type="button" hidden>返回字段 ↑</button></div><div id="downloads" class="download-buttons"></div></div>
+        <div id="review-scroll" class="panel-body">
+          <section id="intake-home" class="intake-home" aria-labelledby="home-heading" hidden><header class="intake-home-heading"><h2 id="home-heading">在这里添加第一批资料</h2><p class="hint">一次粘贴多个 GHSA / OSV 公告链接，自动获取公开资料。也可使用本地文件；调用模型前需单独确认。</p></header><div id="home-intake-slot"></div></section>
+          <div id="result-empty" class="empty"><span class="empty-glyph" aria-hidden="true">▤</span><h3 id="empty-title">选择一条结果开始复核</h3><p id="empty-description">点击左侧“添加资料并提取”，或选择已有批次。</p><button id="retry-preview" type="button" hidden>重新加载结果</button></div>
+          <div id="result-content" hidden>
+            <div class="case-heading"><p id="case-id" class="eyebrow"></p><h2 id="case-title"></h2><p id="case-status" class="hint"></p></div>
+            <div id="fields" class="fields"></div><div class="section-heading"><h3>来源资料与源码</h3></div><div id="evidence" class="evidence-list"></div>
+            <details class="technical-details"><summary>条目原始标识与生成设置</summary><pre id="case-technical"></pre></details>
+          </div>
+        </div>
+      </section>
+    </div>
+    <footer class="page-footer"><span>本机运行 · 关闭页面不会停止任务</span><span><a href="/brand/README.md" target="_blank" rel="noopener">项目标识</a> · <a href="/fonts/OFL.txt" target="_blank" rel="noopener">字体许可</a></span></footer>
+  </main>
+  <dialog id="new-dialog" aria-labelledby="new-heading" aria-describedby="new-description">
+    <header class="dialog-heading"><div><h2 id="new-heading">添加资料并提取</h2><p id="new-description" class="hint">先检查资料，再确认模型用量。关闭此窗口会保留本页草稿，但清空密钥。</p></div><button id="close-dialog" class="icon-button" type="button" aria-label="关闭添加资料窗口">×</button></header>
+    <div id="dialog-intake-slot"><div id="intake-content">
+    <div class="dialog-body">
+      <div id="dialog-notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <form id="prepare-form">
+        <fieldset id="input-fields"><legend><span class="step">1</span>添加资料</legend>
+          <label for="mode">输入方式</label><select id="mode"><option value="urls">粘贴公告链接（GHSA / OSV）</option><option value="material">本地资料：粘贴正文 / 选择文件</option><option value="batch">本地资料：使用已有批次文件</option></select>
+          <div id="urls-controls">
+            <label for="urls">公告链接，可混合粘贴多个 GHSA / OSV 链接</label><textarea id="urls" rows="5" maxlength="65536" spellcheck="false" aria-describedby="urls-hint urls-network network-mode-hint" placeholder="https://github.com/advisories/GHSA-xxxx-xxxx-xxxx&#10;https://osv.dev/vulnerability/GHSA-yyyy-yyyy-yyyy"></textarea>
+            <p id="urls-hint" class="hint">空格、换行或 Markdown 链接都可以。自动去重，每批最多 20 条；无需逐个添加。</p>
+            <p id="urls-network" class="hint">点击下方按钮后会联网，从你粘贴的 GitHub 或 OSV 链接获取公开公告，相关源码仍从 GitHub 获取；资料保存在本机，不运行目标程序。获取资料不调用模型；随后确认额度，一次开始整批提取。各条目依次处理，共享本批上限。限流或拒绝访问会保留失败原因，不会自动切换来源或重试。OSV 公告需能唯一关联 GHSA 并明确标为 GitHub reviewed，才能按本题格式提取。</p>
+            <p id="network-mode-hint" class="hint">资料联网模式在启动时确定，仅影响公告和源码下载，不改变模型请求的联网方式。切换前请先关闭本工作台自己的服务窗口，再运行另一启动入口；仅关闭网页不会停止服务。</p>
+          </div>
+          <div id="material-controls" hidden>
+            <label for="material">公告正文或补充说明</label><textarea id="material" rows="5" placeholder="粘贴原文，或选择下方文件。不用预先填好结果字段。"></textarea>
+            <div class="upload"><label for="files">添加资料文件 <span class="hint">TXT / MD / JSON / HTML / PATCH / DIFF</span></label><input id="files" type="file" accept=".txt,.md,.json,.html,.patch,.diff" multiple></div>
+            <p id="file-list" class="hint">正文优先作为主公告，否则使用第一个文件。正文与文件合计最多 8 份，每份 256 KB。</p>
+          </div>
+          <div id="batch-controls" hidden><label for="input-path">批次文件路径</label><input id="input-path" placeholder="D:\materials\reports.jsonl"><p class="hint">此处填写本地 JSONL 或 URL 列表文件的完整路径，使用已有公告缓存和仓库映射。如需直接粘贴链接并自动下载，请切换到第一种输入方式。</p></div>
+          <div id="local-controls" hidden>
+          <label for="repo">本地源码仓库路径</label><input id="repo" placeholder="D:\repositories\project" autocomplete="off"><p class="hint">填写已有 Git 仓库的完整路径；批次也可以逐条指定。只读源码，不运行目标程序。</p>
+          <details class="advanced"><summary>公告链接与缓存 <span class="hint">可选</span></summary><label for="source">公告链接</label><input id="source" placeholder="https://github.com/advisories/GHSA-…" autocomplete="off"><label for="cache">公告缓存目录</label><input id="cache" placeholder="本地完整路径"><label for="mapping">仓库映射文件（JSON）</label><input id="mapping" placeholder="本地完整路径"></details>
+          </div>
+        </fieldset>
+        <div class="prepare-actions"><button id="prepare" type="submit" class="secondary">获取资料并检查</button><span id="prepare-reason" class="hint">联网获取公开资料，不调用模型</span></div><div id="prepared-summary" class="prepared-summary" role="status" hidden></div>
+      </form>
+      <form id="run-form">
+        <fieldset><legend><span class="step">2</span>确认并开始</legend><div class="profile"><b>DeepSeek Flash</b><span>每份资料最多12次请求 · 多候选 · 不自动重试</span></div>
+          <label for="cap">本批最多使用多少次请求</label><input id="cap" type="number" min="1" max="500" value="12" required aria-describedby="cap-hint"><p id="cap-hint" class="hint">这是停止上限，不是要用满的次数。与右上角总额度共同生效。</p>
+          <label for="key">本次使用的 API key</label><input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="不会写入文件或浏览器存储" required maxlength="500">
+          <label class="check"><input id="confirmed" type="checkbox" required><span id="confirmation-text">我确认将已检查的资料和相关源码发送给模型，并允许使用上述额度。</span></label>
+        </fieldset>
+      </form>
+    </div>
+    <footer class="dialog-footer"><p id="start-reason" class="hint" aria-live="polite">请先检查输入。</p><button id="start" class="primary" type="submit" form="run-form" disabled>开始提取</button></footer>
+    </div></div>
+  </dialog>
+</body>
+</html>

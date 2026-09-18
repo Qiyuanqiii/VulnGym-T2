@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from vulngym_t2 import transport
 from tests.test_t2_v2_protocol import record, step, tool_envelope
+from tests.test_t2_v2_staged_protocol import annotation, decision, location, unknown_location
 
 
 def envelope(content='{"action":"draft"}', *, finish="stop", model=None):
@@ -43,6 +44,88 @@ class FakeResponse:
 
 
 class TransportTests(unittest.TestCase):
+    def staged_envelope(self, calls):
+        body = json.loads(tool_envelope(arguments=json.dumps(calls[0]["arguments"])))
+        body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] = "submit_annotation"
+        return json.dumps(body).encode()
+
+    def test_staged_single_location_object_and_exact_unknown_normalize_from_native_call(self):
+        body = self.staged_envelope(annotation(entry_point=decision(location()),
+            critical_operation=decision(unknown_location(), "uncertain"), trace=decision([location()])))
+        result = transport.parse_chat_response(body, response_mode="staged_tool", stage="annotation")
+        self.assertEqual(result["fields"]["entry_point"], location())
+        self.assertEqual(result["fields"]["trace"], [location()])
+        self.assertNotIn("critical_operation", result["fields"])
+        self.assertEqual(result["field_reviews"]["critical_operation"]["status"], "uncertain")
+        self.assertNotIn("suggested_value", result["field_reviews"]["critical_operation"])
+        self.assertNotIn("private hidden reasoning", json.dumps(result))
+
+    def test_staged_location_wire_failures_preserve_only_new_schema_paths(self):
+        cases = [([], "uncertain", "expected_object", ".value"),
+                 ([location()], "supported", "expected_object", ".value"),
+                 ([location(), location()], "supported", "expected_object", ".value"),
+                 (unknown_location(), "supported", "supported_without_value", ".value"),
+                 (unknown_location(desc="private placeholder detail"), "missing", "location_placeholder_invalid", ".value"),
+                 (location(end_line="private line"), "uncertain", "expected_integer", ".value.end_line")]
+        for value, status, reason, suffix in cases:
+            with self.subTest(reason=reason, value=value):
+                result = transport.parse_chat_response(self.staged_envelope(annotation(
+                    entry_point=decision(location()), critical_operation=decision(value, status))),
+                    response_mode="staged_tool", stage="annotation")
+                self.assertEqual(result["annotation_errors"], [{"field": "critical_operation",
+                    "code": reason, "path": "$[0].arguments.critical_operation" + suffix}])
+                self.assertEqual(result["fields"]["entry_point"], location())
+                self.assertNotIn("critical_operation", result["fields"])
+                self.assertNotIn("critical_operation", result["field_reviews"])
+                self.assertNotIn("private", json.dumps(result))
+
+    def test_staged_old_decision_arrays_are_isolated_but_outer_controls_are_rejected(self):
+        result = transport.parse_chat_response(self.staged_envelope(annotation(
+            entry_point=decision(location()), critical_operation=[decision(location())])),
+            response_mode="staged_tool", stage="annotation")
+        self.assertEqual(result["fields"]["entry_point"], location())
+        self.assertEqual(result["annotation_errors"], [{"field": "critical_operation",
+            "code": "expected_object", "path": "$[0].arguments.critical_operation"}])
+        for control in ("summary", "slot", "entries", "private_control"):
+            calls = annotation()
+            calls[0]["arguments"][control] = "private response value"
+            with self.subTest(control=control), self.assertRaises(transport.TransportError) as caught:
+                transport.parse_chat_response(self.staged_envelope(calls),
+                                              response_mode="staged_tool", stage="annotation")
+            self.assertEqual(caught.exception.error_code, "deepseek_staged_protocol_invalid")
+            self.assertNotIsInstance(caught.exception, transport._CompletionJSONBlocked)
+            self.assertNotIn("private", json.dumps(caught.exception.diagnostic))
+
+    def test_staged_snapshot_argument_json_remains_strict_without_repair(self):
+        for arguments in ('{"unfinished":', '{"commit":{},"commit":{}}', '[]',
+                          '```json\n{}\n```', '{} trailing'):
+            body = json.loads(tool_envelope(arguments=arguments))
+            body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] = "submit_annotation"
+            with self.subTest(arguments=arguments), self.assertRaises(transport._CompletionJSONBlocked) as caught:
+                transport.parse_chat_response(json.dumps(body).encode(),
+                                              response_mode="staged_tool", stage="annotation")
+            self.assertEqual(caught.exception.diagnostic["phase"], "parse_completion_json")
+            self.assertFalse(caught.exception.diagnostic["outer_code_fence_unwrapped"])
+
+    def test_staged_omission_and_empty_objects_cross_transport_as_explicit_field_errors(self):
+        calls = annotation(vuln_title=decision("Legal sibling"))
+        del calls[0]["arguments"]["entry_point"]
+        result = transport.parse_chat_response(self.staged_envelope(calls), response_mode="staged_tool", stage="annotation")
+        self.assertEqual(result["fields"], {"vuln_title": "Legal sibling"})
+        self.assertEqual(result["annotation_errors"], [{"field": "entry_point", "code": "missing_property",
+            "path": "$[0].arguments.entry_point"}])
+        result = transport.parse_chat_response(self.staged_envelope([{"arguments": {}}]),
+                                               response_mode="staged_tool", stage="annotation")
+        self.assertEqual(len(result["annotation_errors"]), 8)
+        self.assertEqual((result["fields"], result["field_reviews"]), ({}, {}))
+
+    def test_staged_resource_exhaustion_remains_global_not_partial_recovery(self):
+        oversized = annotation(vuln_title=decision("Legal sibling"), entry_point=decision([None] * 65))
+        with self.assertRaises(transport._FormatBlocked) as caught:
+            transport.parse_chat_response(self.staged_envelope(oversized), response_mode="staged_tool", stage="annotation")
+        self.assertEqual(caught.exception.diagnostic["protocol_reason"], "array_limit")
+        self.assertNotIsInstance(caught.exception, transport._CompletionJSONBlocked)
+
     def test_strict_function_answer_normalizes_typed_fields_without_hidden_reasoning(self):
         value = step([record(), record("vuln_title", "unconfirmed", status="uncertain")])
         envelope_value = json.loads(tool_envelope(value))
@@ -76,6 +159,27 @@ class TransportTests(unittest.TestCase):
                 transport.parse_chat_response(json.dumps(body).encode(), response_mode="strict_tool")
             self.assertNotIsInstance(caught.exception, transport._CompletionJSONBlocked)
 
+    def test_tool_shape_diagnostics_keep_only_counts_and_whitelisted_names(self):
+        body = json.loads(tool_envelope())
+        message = body["choices"][0]["message"]
+        message["tool_calls"].extend([
+            {"function": {"name": "private-unknown-tool", "arguments": "private-arguments"}},
+            {"function": {"name": "read_file", "arguments": "private-source"}},
+            {"function": {"name": ["private-malformed-name"]}},
+        ])
+        with self.assertRaises(transport.TransportError) as caught:
+            transport.parse_chat_response(json.dumps(body).encode(), response_mode="strict_tool")
+        self.assertEqual(caught.exception.error_code, "deepseek_strict_tool_call_invalid")
+        self.assertEqual(caught.exception.diagnostic, {"tool_call_count": 4,
+            "tool_names": ["read_file", "submit_step"], "unknown_tool_count": 2})
+        self.assertNotIn("private", json.dumps(caught.exception.diagnostic))
+        self.assertEqual(transport._tool_call_diagnostics({"tool_calls": "private-not-an-array"}),
+                         {"tool_call_count": None, "tool_names": [], "unknown_tool_count": None})
+        self.assertEqual(transport._tool_call_diagnostics({"tool_calls": []}),
+                         {"tool_call_count": 0, "tool_names": [], "unknown_tool_count": 0})
+        self.assertEqual(transport._safe_tool_diagnostics({"tool_call_count": True,
+            "unknown_tool_count": -1, "tool_names": ["read_file", "private-name"], "arguments": "private"}), {})
+
     def test_strict_arguments_do_not_unwrap_repair_or_skip_schema_validation(self):
         for arguments in ('{"bad":', '{} {}', '[]', '```json\n{}\n```', '{"a":1,"a":2}'):
             with self.subTest(arguments=arguments), self.assertRaises(transport._CompletionJSONBlocked) as caught:
@@ -85,6 +189,18 @@ class TransportTests(unittest.TestCase):
         with self.assertRaisesRegex(transport.TransportError, "deepseek_strict_protocol_invalid") as caught:
             transport.parse_chat_response(tool_envelope(arguments='{"action":"draft"}'), response_mode="strict_tool")
         self.assertNotIsInstance(caught.exception, transport._CompletionJSONBlocked)
+
+    def test_protocol_failure_preserves_only_structural_diagnostics(self):
+        value = step()
+        value["unexpected_private_key"] = "private response value"
+        with self.assertRaises(transport.TransportError) as caught:
+            transport.parse_chat_response(tool_envelope(value), response_mode="strict_tool")
+        error = caught.exception
+        self.assertEqual(error.error_code, "deepseek_strict_protocol_invalid")
+        self.assertNotIsInstance(error, transport._CompletionJSONBlocked)
+        self.assertEqual(error.diagnostic["phase"], "validate_submit_step")
+        self.assertEqual(set(error.diagnostic), {"phase", "protocol_reason", "protocol_path"})
+        self.assertNotIn("private", json.dumps(error.diagnostic))
 
     def test_format_isolation_marker_requires_completed_valid_envelope(self):
         for mutation in (lambda body: body.update(model="other"),
@@ -253,6 +369,32 @@ class TransportTests(unittest.TestCase):
         timer.return_value.cancel.assert_called_once()
         connection.close.assert_called_once()
         self.assertTrue(response.closed)
+
+    def test_interrupted_read_still_closes_response_connection_and_timer(self):
+        response = FakeResponse(b"{}")
+        connection = MagicMock()
+        connection.getresponse.return_value = response
+        with patch.object(transport.http.client, "HTTPSConnection", return_value=connection), \
+                patch.object(transport, "Timer") as timer, \
+                patch.object(response, "read1", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                transport._post_official(b"{}", "synthetic-key", 5)
+        self.assertTrue(response.closed)
+        connection.request.assert_called_once()
+        connection.close.assert_called_once()
+        timer.return_value.cancel.assert_called_once()
+
+    def test_connection_cleanup_survives_response_close_failure(self):
+        response = FakeResponse(b"{}")
+        connection = MagicMock()
+        connection.getresponse.return_value = response
+        with patch.object(transport.http.client, "HTTPSConnection", return_value=connection), \
+                patch.object(transport, "Timer") as timer, \
+                patch.object(response, "close", side_effect=OSError("synthetic close error")):
+            with self.assertRaises(OSError):
+                transport._post_official(b"{}", "synthetic-key", 5)
+        connection.close.assert_called_once()
+        timer.return_value.cancel.assert_called_once()
 
     def test_http_denials_and_redirects_never_retry_or_follow_location(self):
         for status, code in ((301, "deepseek_redirect_rejected"), (401, "deepseek_authentication_failed"),

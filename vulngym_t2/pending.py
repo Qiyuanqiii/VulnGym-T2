@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 import re
 
+from .review_export import _input_reviews, _float
+
 
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 MAX_PUBLIC_BYTES = 20_000_000
@@ -66,7 +68,7 @@ def _reject_constant(value):
 def _json_object(text: str, label: str) -> dict:
     try:
         value = json.loads(text, object_pairs_hook=_unique_object,
-                           parse_constant=_reject_constant)
+                           parse_constant=_reject_constant, parse_float=_float)
     except (ValueError, RecursionError) as error:
         raise ValueError(f"pending_{label}_json_invalid") from error
     if not isinstance(value, dict):
@@ -74,7 +76,7 @@ def _json_object(text: str, label: str) -> dict:
     return value
 
 
-def _urls(path: Path) -> list[dict]:
+def _urls(path: Path, *, allow_repeated_reports: bool = False) -> list[dict]:
     rows, seen = [], set()
     for line in _text(_read(path, MAX_INPUT_BYTES, "input"), "input").splitlines():
         url = line.strip()
@@ -84,7 +86,7 @@ def _urls(path: Path) -> list[dict]:
         if match is None:
             raise ValueError("pending_ghsa_url_list_required")
         report_id = match["report"].upper()
-        if report_id in seen:
+        if report_id in seen and not allow_repeated_reports:
             raise ValueError("pending_duplicate_input_report_id")
         seen.add(report_id)
         rows.append({"input_index": len(rows) + 1, "report_id": report_id, "source_link": url})
@@ -98,21 +100,23 @@ def _urls(path: Path) -> list[dict]:
 def plan_pending(input_path: str | Path, run_dir: str | Path) -> dict:
     """Prove a processed GHSA prefix, returning only public input identities.
 
-    Every saved review, including provider-failure drafts and input failures,
-    counts as processed. An interrupted or partially finalized run is refused:
+    Every saved input, including provider-failure drafts and input failures,
+    counts as processed once, regardless of candidate count. An unfinished run is refused:
     its next item may already have issued a request without a durable review.
     The input is the original URL list, not a filtered or reordered replacement.
     """
-    rows = _urls(_local(input_path))
     root = _local(run_dir).resolve()
     summary_raw = _read(root / "summary.json", min(MAX_PUBLIC_BYTES, 1024 * 1024), "summary")
     summary = _json_object(_text(summary_raw, "summary"), "summary")
+    rows = _urls(_local(input_path), allow_repeated_reports=summary.get("counting_version") == "input-review-v2")
     status = summary.get("status")
     if not isinstance(status, str) or status not in {"completed", "completed_with_errors", "provider_stopped"}:
         raise ValueError("pending_run_boundary_uncertain")
     review_raw = _read(root / "review.jsonl", MAX_PUBLIC_BYTES - len(summary_raw), "review")
     reviews = [_json_object(line, "review")
                for line in _text(review_raw, "review").splitlines() if line.strip()]
+    if "counting_version" in summary:
+        return _plan_multi(rows, summary, reviews)
     expected = {"requested_input_count": len(rows), "input_count": len(reviews),
                 "unprocessed_input_count": len(rows) - len(reviews)}
     if len(reviews) > len(rows) or any(
@@ -151,6 +155,32 @@ def plan_pending(input_path: str | Path, run_dir: str | Path) -> dict:
             "pending_input_count": len(rows) - len(reviews),
             "processed_by_status": {key: counts[key] for key in ("complete", "draft", "input_failure")},
             "pending": rows[len(reviews):], "requires_separate_run_authorization": True,
+            "checkpoint_restored": False, "source_materials_compared": False}
+
+
+def _plan_multi(rows: list[dict], summary: dict, reviews: list[dict]) -> dict:
+    try:
+        groups = _input_reviews(summary, reviews)
+    except ValueError as error:
+        raise ValueError("pending_input_review_mapping_invalid") from error
+    if summary["requested_input_count"] != len(rows):
+        raise ValueError("pending_summary_count_mismatch")
+    for index, group in enumerate(groups):
+        if not _ENTRY.fullmatch(group["input_id"]) or any(
+                not _ENTRY.fullmatch(identity) for identity in group["review_entry_ids"]):
+            raise ValueError("pending_review_identity_invalid")
+        expected_report = rows[index]["report_id"]
+        expected_source = "https://github.com/advisories/GHSA-" + expected_report[5:].lower()
+        if group["report_id"] != expected_report or group["source_link"] != expected_source:
+            raise ValueError("pending_processed_prefix_mismatch")
+    counts = Counter(group["status"] for group in groups)
+    processed = len(groups)
+    return {"status": "pending_ready", "source_status": summary["status"], "http_attempts": 0,
+            "counting_version": summary["counting_version"], "requested_input_count": len(rows),
+            "processed_input_count": processed, "pending_input_count": len(rows) - processed,
+            "review_count": len(reviews),
+            "processed_by_status": {key: counts[key] for key in ("complete", "partial", "draft", "input_failure")},
+            "pending": rows[processed:], "requires_separate_run_authorization": True,
             "checkpoint_restored": False, "source_materials_compared": False}
 
 

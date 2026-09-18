@@ -264,7 +264,7 @@ class ReviewExportTests(unittest.TestCase):
                 self.assertIn("聚焦补证状态：" + label, lines[index])
                 self.assertEqual(lines[index + 1], "")
                 self.assertTrue(lines[index + 2].startswith("机器自查状态：未请求（不是失败）"))
-                self.assertIn("最多1个模型轮次、2次只读工具", lines[index])
+                self.assertIn("预算内只读补证，实际次数见动作记录", lines[index])
                 self.assertIn("非人工验收，不保证语义正确", lines[index])
                 self.assertNotIn("<script>", section)
                 self.assertEqual((self.summary, self.entries, self.reviews), before)
@@ -296,6 +296,106 @@ class ReviewExportTests(unittest.TestCase):
                 summary.update(changes)
                 with self.assertRaises(ExportError):
                     render_packet(summary, self.entries, self.reviews)
+
+    def test_not_received_candidate_renders_placeholder_draft_section(self):
+        self.reviews[0]["initial_draft_status"] = "not_received"
+        self.reviews[0]["actions"] = [{"action": "annotation_snapshot_reencoding", "stage": "draft",
+                                       "summary": "budget_unavailable"}]
+        before = deepcopy((self.summary, self.entries, self.reviews))
+        packet = render_packet(self.summary, self.entries, self.reviews)
+        section = packet.split("## 逐条复核 ")[1]
+        self.assertIn("### 初稿未接收说明", section)
+        self.assertLess(section.index("### 初稿未接收说明"), section.index("### 字段判断"))
+        self.assertIn("本候选的结构化初稿未接收或未恢复", section)
+        self.assertIn("仅有输入元数据与已收集证据", section)
+        self.assertIn("initial&#95;draft&#95;status", section)
+        self.assertIn("not&#95;received", section)
+        self.assertIn("budget&#95;unavailable", section)
+        self.assertIn("已保留证据条数", section)
+        self.assertIn("| 3 | E1, E2, E3 |", section)
+        self.assertIn("本工具不自动填充任何字段", section)
+        self.assertIn("被拒收对象的字段值从未被应用", section)
+        self.assertNotIn("RAW ", section)
+        self.assertEqual((self.summary, self.entries, self.reviews), before)
+        self.save()
+        with patch("socket.socket", side_effect=AssertionError("network forbidden")):
+            export_review(self.run, self.root / "gap.md")
+        exported = (self.root / "gap.md").read_text(encoding="utf-8")
+        self.assertIn("### 初稿未接收说明", exported)
+        self.assertIn("| 3 | E1, E2, E3 |", exported)
+
+    def test_accepted_and_partial_drafts_do_not_render_the_placeholder_section(self):
+        self.reviews[0]["initial_draft_status"] = "accepted"
+        self.reviews[1]["initial_draft_status"] = "accepted"
+        self.reviews[2]["initial_draft_status"] = "accepted"
+        packet = render_packet(self.summary, self.entries, self.reviews)
+        self.assertNotIn("初稿未接收说明", packet)
+        # "partial" received a draft with recoverable field errors; its row can
+        # hold real merged values, so it must not be called a placeholder.
+        self.reviews[0]["initial_draft_status"] = "partial"
+        self.reviews[0]["actions"] = [{"action": "annotation_snapshot_reencoding", "stage": "draft",
+                                       "summary": "recovered"}]
+        packet = render_packet(self.summary, self.entries, self.reviews)
+        self.assertNotIn("初稿未接收说明", packet)
+
+    def test_received_initial_draft_survives_a_failed_self_review_encoding(self):
+        # NLTK v80 shape: accepted initial fields remain even when the later
+        # self-review encoding cannot be corrected. A failed review is not a
+        # missing initial draft; neither accepted nor partial values are lost.
+        for status in ("accepted", "partial"):
+            for stage in ("self_review", "draft"):
+                with self.subTest(status=status, stage=stage):
+                    self.reviews[0]["initial_draft_status"] = status
+                    self.reviews[0]["self_review_status"] = "failed"
+                    self.reviews[0]["actions"] = [
+                        {"action": "annotation_snapshot_reencoding", "stage": stage,
+                         "summary": "budget_unavailable"}]
+                    before = deepcopy((self.summary, self.entries, self.reviews))
+                    packet = render_packet(self.summary, self.entries, self.reviews)
+                    self.assertNotIn("初稿未接收说明", packet)
+                    self.assertEqual((self.summary, self.entries, self.reviews), before)
+
+    def test_legacy_reencoding_failure_requires_an_explicit_draft_stage(self):
+        for review in self.reviews:
+            review.pop("initial_draft_status", None)
+        for stage in ("self_review", "field_recovery", None):
+            with self.subTest(stage=stage):
+                action = {"action": "annotation_snapshot_reencoding", "summary": "failed"}
+                if stage is not None:
+                    action["stage"] = stage
+                self.reviews[0]["actions"] = [action]
+                before = deepcopy((self.summary, self.entries, self.reviews))
+                packet = render_packet(self.summary, self.entries, self.reviews)
+                self.assertNotIn("初稿未接收说明", packet)
+                self.assertEqual((self.summary, self.entries, self.reviews), before)
+
+    def test_explicit_missing_initial_status_needs_no_reencoding_action(self):
+        for status in ("not_received", "no_valid_updates"):
+            with self.subTest(status=status):
+                self.reviews[0]["initial_draft_status"] = status
+                self.reviews[0]["actions"] = []
+                packet = render_packet(self.summary, self.entries, self.reviews)
+                section = packet.split("## 逐条复核 ")[1]
+                self.assertIn("### 初稿未接收说明", section)
+                self.assertIn(status.replace("_", "&#95;"), section)
+
+    def test_legacy_records_without_initial_draft_status_render_unchanged(self):
+        for review in self.reviews:
+            review.pop("initial_draft_status", None)
+        before = deepcopy((self.summary, self.entries, self.reviews))
+        packet = render_packet(self.summary, self.entries, self.reviews)
+        self.assertNotIn("初稿未接收说明", packet)
+        self.assertIn("### 字段判断", packet)
+        self.assertEqual((self.summary, self.entries, self.reviews), before)
+        # A legacy row without the field still shows the section when its own
+        # actions record an unrecovered snapshot re-encoding.
+        self.reviews[0]["actions"] = [{"action": "annotation_snapshot_rejected", "code": "missing_root_fields"},
+                                      {"action": "annotation_snapshot_reencoding", "stage": "draft",
+                                       "summary": "budget_unavailable"}]
+        section = render_packet(self.summary, self.entries, self.reviews).split("## 逐条复核 ")[1]
+        self.assertIn("### 初稿未接收说明", section)
+        self.assertIn("| 3 | E1, E2, E3 |", section)
+        self.assertLess(section.index("### 初稿未接收说明"), section.index("### 字段判断"))
 
     def test_cli_emits_compact_json_on_success_and_failure(self):
         output = self.root / "packet.md"

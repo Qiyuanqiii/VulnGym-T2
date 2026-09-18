@@ -9,11 +9,17 @@ import tempfile
 import unittest
 
 from vulngym_t2.intake import MAX_DOCUMENT_CHARS, load_jobs
-from vulngym_t2.repository import RepoReader
+from vulngym_t2.repository import RepoReader, safe_error_code
 from vulngym_t2._vendor.schema_adapter import validate_entry
 
 
 class IntakeRepoTests(unittest.TestCase):
+    def test_repository_error_codes_are_an_exact_allowlist(self):
+        self.assertEqual(safe_error_code(ValueError("commit_unavailable")), "commit_unavailable")
+        for error in (ValueError("synthetic_private_string"), ValueError("path D:/private/example"),
+                      RuntimeError("commit_unavailable"), ValueError("commit_unavailable", "extra")):
+            self.assertEqual(safe_error_code(error), "repository_read_failed")
+
     @classmethod
     def setUpClass(cls):
         temp_root = Path("D:/Temp") if os.name == "nt" else None
@@ -104,6 +110,32 @@ class IntakeRepoTests(unittest.TestCase):
         self.assertIn("invalid_json_record", jobs[1]["input_error"])
         self.assertIn("repository_path_missing", jobs[2]["input_error"])
 
+    def test_malformed_json_or_url_rows_do_not_drop_later_input(self):
+        batch = self.root / "edge-rows.jsonl"
+        rows = [
+            '{"nested":' + '[' * 1500 + '0' + ']' * 1500 + '}',
+            'https://[invalid/GHSA-2345-6789-cfgh',
+            '{"description":"first","description":"contradictory"}',
+            '{"description":"\\ud800"}',
+            '{"unused":NaN}',
+            json.dumps({"description": "Valid final input", "repo_path": "repo",
+                        "repo_url": "https://github.com/example/fixture"}),
+        ]
+        batch.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        jobs = load_jobs(input_path=batch)
+        self.assertEqual(len(jobs), len(rows))
+        for item in jobs[:-1]:
+            self.assertIn("input_error", item)
+        self.assertNotIn("input_error", jobs[-1])
+
+    def test_duplicate_primary_json_identity_is_not_promoted_to_metadata(self):
+        document = self.root / "duplicate-primary.json"
+        document.write_text('{"ghsa_id":"GHSA-2345-6789-cfgh","ghsa_id":"GHSA-2345-6789-jmpq",'
+                            '"summary":"Synthetic","description":"Ambiguous primary identity"}', encoding="utf-8")
+        loaded = load_jobs(advisory=document, repo=self.repo)[0]
+        self.assertTrue(loaded["documents"][0]["json_parse_error"])
+        self.assertNotIn("advisory_metadata", loaded)
+
     def test_cached_url_list_with_map_and_missing_cache(self):
         cache = self.root / "cache"
         cache.mkdir(exist_ok=True)
@@ -136,6 +168,10 @@ class IntakeRepoTests(unittest.TestCase):
         mismatched = load_jobs(input_path=links, cache_dir=cache, repo=self.repo)[1]
         self.assertEqual(mismatched["fix_commits"], [])
         self.assertIn("advisory_metadata_report_mismatch", mismatched["input_warnings"])
+        self.assertIn("primary_advisory_report_mismatch", mismatched["input_error"])
+        self.assertEqual(mismatched["input_conflicts"][0]["expected_report_id"], "GHSA-2345-6789-JMPQ")
+        self.assertEqual(mismatched["input_conflicts"][0]["actual_report_id"], "GHSA-2345-6789-CFGH")
+        self.assertEqual(mismatched["documents"][0]["role"], "primary")
 
     def test_native_advisory_json_is_readable_bounded_input_not_an_answer(self):
         advisory = self.root / "native-ghsa.json"
@@ -172,6 +208,7 @@ class IntakeRepoTests(unittest.TestCase):
         self.assertNotIn("advisory_metadata", mismatched)
         self.assertNotIn("vuln_ids", mismatched)
         self.assertIn("advisory_metadata_report_mismatch", mismatched["input_warnings"])
+        self.assertIn("primary_advisory_report_mismatch", mismatched["input_error"])
         raw["description"] = "long body " * 3000 + f"https://github.com/example/fixture/commit/{self.before}"
         advisory.write_text(json.dumps(raw), encoding="utf-8")
         long_job = load_jobs(advisory=advisory, repo=self.repo)[0]
@@ -184,6 +221,32 @@ class IntakeRepoTests(unittest.TestCase):
         self.assertTrue(malformed["json_parse_error"])
         self.assertNotIn("input_format", malformed)
         self.assertNotIn("advisory_metadata", malformed)
+
+    def test_other_ghsa_references_and_supporting_advisories_are_not_primary_conflicts(self):
+        primary = self.root / "primary-with-reference.json"
+        primary.write_text(json.dumps({
+            "ghsa_id": "GHSA-2345-6789-cfgh", "summary": "Primary advisory",
+            "description": "Related issue: GHSA-2345-6789-jmpq",
+            "references": ["https://github.com/advisories/GHSA-2345-6789-jmpq"],
+        }), encoding="utf-8")
+        supporting = self.root / "supporting-other-advisory.json"
+        supporting.write_text(json.dumps({
+            "ghsa_id": "GHSA-2345-6789-jmpq", "summary": "Related advisory",
+            "description": "Supplementary context, not this report's identity.",
+        }), encoding="utf-8")
+        batch = self.root / "primary-and-supporting.jsonl"
+        batch.write_text(json.dumps({
+            "source_link": "https://github.com/advisories/GHSA-2345-6789-cfgh",
+            "repo_path": "repo", "repo_url": "https://github.com/example/fixture",
+            "advisory": primary.name,
+            "documents": [{"name": "related", "path": supporting.name, "kind": "supporting"}],
+        }) + "\n", encoding="utf-8")
+        loaded = load_jobs(input_path=batch)[0]
+        self.assertNotIn("input_error", loaded)
+        self.assertEqual(loaded["input_conflicts"], [])
+        self.assertEqual(loaded["advisory_metadata"]["ghsa_id"], "GHSA-2345-6789-CFGH")
+        self.assertEqual(loaded["title"], "Primary advisory")
+        self.assertEqual(len(loaded["documents"]), 2)
 
     def test_reader_discovers_files_resolves_history_and_reads_fix_diff(self):
         reader = RepoReader(self.repo)

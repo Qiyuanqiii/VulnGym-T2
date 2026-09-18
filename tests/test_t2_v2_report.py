@@ -90,7 +90,7 @@ class ReportTests(unittest.TestCase):
                 index = next(i for i, line in enumerate(lines) if line.startswith("- 聚焦补证状态："))
                 self.assertIn("聚焦补证状态：" + label, lines[index])
                 self.assertTrue(lines[index + 1].startswith("- 机器自查状态：未请求（不是失败）"))
-                self.assertIn("最多1个模型轮次、2次只读工具", lines[index])
+                self.assertIn("预算内只读补证，实际次数见动作记录", lines[index])
                 self.assertIn("非人工验收，不保证语义正确", lines[index])
                 self.assertNotIn("<script>", content)
                 self.assertEqual((summary, reviews), before)

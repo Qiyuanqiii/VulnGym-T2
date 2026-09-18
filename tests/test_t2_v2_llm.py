@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from vulngym_t2.llm import DeepSeekClient, MODEL, ProviderError, RequestLedger
-from vulngym_t2 import transport
+from vulngym_t2 import staged_protocol, transport
 from tests.test_t2_v2_protocol import record, step, tool_envelope
 
 
@@ -23,15 +23,21 @@ def malformed_reply(content='{"unfinished":'):
     return json.dumps(value).encode()
 
 
+def staged_reply(name, arguments):
+    envelope = json.loads(tool_envelope(arguments=json.dumps(arguments)))
+    envelope["choices"][0]["message"]["tool_calls"][0]["function"]["name"] = name
+    return json.dumps(envelope).encode()
+
+
 class ClientTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="t2-client-")
+        self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name).resolve() / "requests.jsonl"
         self.ledger = RequestLedger(self.path, limit=2)
 
     def tearDown(self):
         self.ledger.close()
-        self.temp.cleanup()
 
     def client(self, send):
         return DeepSeekClient("dummy-not-a-real-key", self.ledger, run_id="synthetic", send=send)
@@ -66,6 +72,153 @@ class ClientTests(unittest.TestCase):
                 client.complete([{"role": "user", "content": "test"}])
         self.assertEqual(len(sent), 1)
         self.assertFalse(client.can_continue_after_format_error)
+
+    def test_protocol_diagnostics_reach_ledger_without_allowing_resume(self):
+        sent = []
+        value = step()
+        value["private_unknown_name"] = "private response value"
+        client = DeepSeekClient("dummy-not-a-real-key", self.ledger, run_id="synthetic", response_mode="strict_tool",
+                                send=lambda *_: sent.append(True) or tool_envelope(value))
+        with self.assertRaisesRegex(ProviderError, "deepseek_strict_protocol_invalid"):
+            client.complete([{"role": "user", "content": "test"}])
+        diagnostic = client.events[0]["diagnostics"]
+        self.assertEqual(diagnostic["phase"], "validate_submit_step")
+        self.assertIn("protocol_reason", diagnostic)
+        self.assertIn("protocol_path", diagnostic)
+        self.assertFalse(diagnostic["format_error_isolatable"])
+        self.assertFalse(client.can_continue_after_format_error)
+        with self.assertRaises(ProviderError):
+            client.start_next_case("different-case", continue_on_format_error=True)
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn("private", self.path.read_text())
+
+    def test_staged_tool_shape_diagnostics_reach_ledger_without_raw_names_or_retry(self):
+        body = json.loads(tool_envelope())
+        calls = body["choices"][0]["message"]["tool_calls"]
+        calls[0]["function"].update(name="read_file", arguments=json.dumps({
+            "commit": "a" * 40, "path": "service/handler.py", "start_line": 1, "end_line": 2}))
+        calls.append({"type": "function", "id": "private-call-id", "function": {
+            "name": "private-unknown-function", "arguments": "private-response"}})
+        sent = []
+        client = DeepSeekClient("private-synthetic-key", self.ledger, run_id="synthetic",
+                                response_mode="staged_tool", thinking="disabled",
+                                send=lambda *_: sent.append(True) or json.dumps(body).encode())
+        for _ in range(2):
+            with self.assertRaisesRegex(ProviderError, "deepseek_strict_tool_call_invalid"):
+                client.complete([{"role": "user", "content": "synthetic"}], stage="read")
+        diagnostic = client.events[0]["diagnostics"]
+        self.assertEqual(diagnostic["tool_call_count"], 2)
+        self.assertEqual(diagnostic["tool_names"], ["read_file"])
+        self.assertEqual(diagnostic["unknown_tool_count"], 1)
+        self.assertEqual(diagnostic["protocol_stage"], "read")
+        self.assertFalse(client.can_continue_after_format_error)
+        self.assertEqual((len(sent), client.calls, self.ledger.started), (1, 1, 1))
+        stored = self.path.read_text()
+        self.assertNotIn("private", stored)
+        self.assertEqual(json.loads(stored.splitlines()[-1])["diagnostics"]["tool_names"], ["read_file"])
+        client.close()
+
+    def test_staged_single_and_multi_use_the_same_direct_snapshot_annotation(self):
+        payloads = []
+        snapshot = staged_protocol.snapshot_from_state({}, {})
+        messages = [{"role": "user", "content": "Synthetic candidate only."}]
+        original_header = self.path.read_text().splitlines()[0]
+        for multi in (False, True):
+            client = DeepSeekClient("synthetic-key", self.ledger, run_id="synthetic",
+                                    response_mode="staged_tool", thinking="disabled", multi_entry=multi,
+                                    send=lambda body, *_: payloads.append(json.loads(body)) or staged_reply("submit_annotation", snapshot))
+            result = client.complete(messages, stage="annotation")
+            self.assertEqual(result["action"], "draft")
+            self.assertEqual(client.calls, 1)
+            self.assertEqual(client.summary()["staged_wire_version"],
+                             "candidate-serial-snapshot-v2" if multi else "snapshot-v2")
+            client.close()
+        for payload in payloads:
+            self.assertEqual(payload["model"], MODEL)
+            self.assertEqual(payload["tool_choice"], "required")
+            self.assertEqual(payload["thinking"], {"type": "disabled"})
+            self.assertNotIn("reasoning_effort", payload)
+            self.assertNotIn("response_format", payload)
+            self.assertEqual([tool["function"]["name"] for tool in payload["tools"]], ["submit_annotation"])
+            definition = payload["tools"][0]["function"]
+            self.assertTrue(definition["strict"])
+            schema = definition["parameters"]
+            self.assertEqual(set(schema["properties"]), set(staged_protocol.ANNOTATION_FIELDS))
+            self.assertEqual(set(schema["required"]), set(schema["properties"]))
+            self.assertFalse(schema["additionalProperties"])
+            for field in staged_protocol.ANNOTATION_FIELDS:
+                self.assertEqual(schema["properties"][field]["type"], "object")
+            self.assertNotIn("summary", schema["properties"])
+            self.assertNotIn("entries", schema["properties"])
+            self.assertNotIn("slot", schema["properties"])
+        self.assertEqual(payloads[0]["tools"], payloads[1]["tools"])
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(self.ledger.started, 2)
+        self.assertEqual(self.path.read_text().splitlines()[0], original_header)
+
+    def test_candidate_selection_is_multi_only_then_annotation_uses_shared_budget(self):
+        replies = iter((staged_reply("propose_candidates", {"candidates": []}),
+                        staged_reply("submit_annotation", staged_protocol.snapshot_from_state({}, {}))))
+        payloads = []
+        client = DeepSeekClient("synthetic-key", self.ledger, run_id="synthetic",
+                                response_mode="staged_tool", thinking="disabled", multi_entry=True,
+                                max_requests=2, send=lambda body, *_: payloads.append(json.loads(body)) or next(replies))
+        result = client.complete([{"role": "user", "content": "Choose candidates."}], stage="candidate_selection")
+        self.assertEqual(result, {"action": "candidates", "candidates": []})
+        self.assertEqual([tool["function"]["name"] for tool in payloads[0]["tools"]], ["propose_candidates"])
+        self.assertEqual(client.complete([{"role": "user", "content": "Snapshot."}], stage="annotation")["action"], "draft")
+        with self.assertRaisesRegex(ProviderError, "run_request_limit_reached"):
+            client.complete([{"role": "user", "content": "No extra budget."}], stage="annotation")
+        self.assertEqual((len(payloads), client.calls, self.ledger.started), (2, 2, 2))
+        self.assertEqual(client.summary()["automatic_retries"], 0)
+        client.close()
+
+    def test_old_multi_stage_and_single_candidate_selection_fail_before_reserve(self):
+        sent = []
+        for multi, stage in ((False, "annotation_multi"), (True, "annotation_multi"),
+                             (False, "candidate_selection"), (True, "unknown"),
+                             (False, None), (True, [])):
+            client = DeepSeekClient("synthetic-key", self.ledger, run_id="synthetic",
+                                    response_mode="staged_tool", thinking="disabled", multi_entry=multi,
+                                    send=lambda *_: sent.append(True))
+            with self.subTest(multi=multi, stage=stage), self.assertRaises(ValueError):
+                client.complete([{"role": "user", "content": "Must stay local."}], stage=stage)
+            self.assertEqual(client.calls, 0)
+            self.assertIsNone(client.halted)
+            client.close()
+        self.assertEqual(sent, [])
+        self.assertEqual(self.ledger.started, 0)
+
+    def test_multi_read_and_followup_still_use_existing_read_functions(self):
+        payloads = []
+        client = DeepSeekClient("synthetic-key", self.ledger, run_id="synthetic",
+                                response_mode="staged_tool", thinking="disabled", multi_entry=True,
+                                send=lambda body, *_: payloads.append(json.loads(body)) or staged_reply("inspect_commit", {"commit": "a" * 40}))
+        for stage in ("read", "followup"):
+            result = client.complete([{"role": "user", "content": "Existing read."}], stage=stage)
+            self.assertEqual(result["action"], "tools")
+            self.assertEqual(result["calls"][0]["tool"], "inspect_commit")
+        for payload in payloads:
+            names = {tool["function"]["name"] for tool in payload["tools"]}
+            self.assertIn("inspect_commit", names)
+            self.assertNotIn("submit_annotation", names)
+            self.assertNotIn("propose_candidates", names)
+            self.assertNotIn("submit_annotations", names)
+        self.assertEqual(self.ledger.started, 2)
+        client.close()
+
+    def test_old_multi_response_container_is_not_a_fallback_for_snapshot(self):
+        sent = []
+        client = DeepSeekClient("synthetic-key", self.ledger, run_id="synthetic",
+                                response_mode="staged_tool", thinking="disabled", multi_entry=True,
+                                send=lambda *_: sent.append(True) or staged_reply("submit_annotations", {"entries": []}))
+        for _ in range(2):
+            with self.assertRaises(ProviderError):
+                client.complete([{"role": "user", "content": "Single candidate snapshot."}], stage="annotation")
+        self.assertEqual((len(sent), client.calls, self.ledger.started), (1, 1, 1))
+        self.assertFalse(client.can_continue_after_format_error)
+        self.assertEqual(client.events[0]["diagnostics"]["protocol_stage"], "annotation")
+        client.close()
 
     def test_disabled_thinking_requires_strict_tool_and_omits_reasoning_effort(self):
         sent = []
@@ -312,11 +465,207 @@ class ClientTests(unittest.TestCase):
                     DeepSeekClient("dummy-not-a-real-key", self.ledger, run_id="synthetic", model=model)
         self.assertEqual(self.ledger.started, 0)
 
-    def test_model_selection_does_not_raise_the_500_request_cap(self):
+    def test_model_selection_does_not_raise_authorization_or_run_caps(self):
+        from vulngym_t2.llm import MAX_AUTHORIZED_REQUESTS
         with self.assertRaisesRegex(ValueError, "request_limit_invalid"):
-            RequestLedger(self.path.with_name("over-limit.jsonl"), limit=501, model="deepseek-flash")
+            RequestLedger(self.path.with_name("over-limit.jsonl"), limit=MAX_AUTHORIZED_REQUESTS + 1,
+                          model="deepseek-flash")
         with self.assertRaisesRegex(ValueError, "run_request_limit_invalid"):
             DeepSeekClient("dummy-not-a-real-key", self.ledger, run_id="synthetic", max_requests=501)
+
+    def test_partial_snapshot_is_successful_transport_with_structured_field_diagnostics(self):
+        from tests.test_t2_v2_staged_protocol import decision
+        snapshot = staged_protocol.snapshot_from_state({}, {})
+        snapshot["vuln_title"] = decision("Legal sibling")
+        del snapshot["entry_point"]
+        client = DeepSeekClient("synthetic-key", self.ledger, run_id="synthetic", response_mode="staged_tool",
+                                thinking="disabled", send=lambda *_: staged_reply("submit_annotation", snapshot))
+        self.addCleanup(client.close)
+        result = client.complete([{"role": "user", "content": "Synthetic draft."}], stage="annotation")
+        self.assertEqual(result["fields"], {"vuln_title": "Legal sibling"})
+        event = client.events[0]
+        self.assertEqual(event["status"], "success")
+        self.assertNotIn("failure_kind", event)
+        self.assertEqual(event["diagnostics"]["annotation_error_count"], 1)
+        self.assertEqual(event["diagnostics"]["annotation_errors"], [{"field": "entry_point",
+            "code": "missing_property", "path": "$[0].arguments.entry_point"}])
+        self.assertEqual(json.loads(self.path.read_text().splitlines()[-1])["diagnostics"], event["diagnostics"])
+        result["annotation_errors"][0]["code"] = "caller_mutation"
+        self.assertEqual(event["diagnostics"]["annotation_errors"][0]["code"], "missing_property")
+        self.assertIsNone(client.halted)
+        self.assertEqual((client.calls, self.ledger.started), (1, 1))
+
+    def test_failure_kind_is_typed_not_permission_to_continue(self):
+        bad_arguments = json.loads(staged_reply("submit_annotation", {}))
+        bad_arguments["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] = '{"unfinished":'
+        cases = [(staged_reply("submit_annotation", {"extra": "private-value"}), "format", False),
+                 (staged_reply("unrecognized", {}), "format", False),
+                 (json.dumps(bad_arguments).encode(), "format", True),
+                 (reply(finish="length"), "format", False),
+                 (reply(), "format", False),
+                 (reply(model="another-model"), "transport", False),
+                 (b'{"outer":', "transport", False)]
+        for index, (response, kind, may_continue) in enumerate(cases):
+            ledger = RequestLedger(self.path.with_name(f"typed-{index}.jsonl"), limit=2)
+            self.addCleanup(ledger.close)
+            client = DeepSeekClient("synthetic-key", ledger, run_id="synthetic", response_mode="staged_tool",
+                                    thinking="disabled", send=lambda *_: response)
+            self.addCleanup(client.close)
+            with self.subTest(index=index), self.assertRaises(ProviderError):
+                client.complete([{"role": "user", "content": "Synthetic."}], stage="annotation")
+            self.assertEqual(client.events[0]["failure_kind"], kind)
+            self.assertEqual(json.loads(ledger.path.read_text().splitlines()[-1])["failure_kind"], kind)
+            self.assertEqual(client.can_continue_after_format_error, may_continue)
+            self.assertEqual(client.calls, 1)
+            self.assertNotIn("private-value", ledger.path.read_text())
+
+    def test_malformed_finish_reason_preserves_usage_and_transport_error_kind(self):
+        body = json.loads(reply())
+        body["choices"][0]["finish_reason"] = []
+        client = self.client(lambda *_: json.dumps(body).encode())
+        self.addCleanup(client.close)
+        with self.assertRaisesRegex(ProviderError, "deepseek_completion_incomplete"):
+            client.complete([{"role": "user", "content": "Synthetic."}])
+        self.assertEqual(client.events[0]["usage"]["total_tokens"], 30)
+        self.assertEqual(client.events[0]["failure_kind"], "transport")
+        self.assertEqual(client.events[0]["diagnostics"]["finish_reason"], "other")
+
+    def test_closed_client_cannot_consume_a_request_with_cleared_credentials(self):
+        sent = []
+        client = self.client(lambda *_: sent.append(True) or reply())
+        client.close()
+        client.close()
+        with self.assertRaisesRegex(ProviderError, "provider_client_closed"):
+            client.complete([{"role": "user", "content": "Must not send."}])
+        with self.assertRaisesRegex(ProviderError, "provider_client_closed"):
+            client.start_next_case("next")
+        self.assertEqual(client._key, "")
+        self.assertEqual(sent, [])
+        self.assertEqual(self.ledger.started, 0)
+
+    def test_closed_ledger_cannot_write_after_another_writer_acquires_its_lock(self):
+        sent = []
+        stale_ledger = self.ledger
+        client = self.client(lambda *_: sent.append(True) or reply())
+        self.addCleanup(client.close)
+        stale_ledger.close()
+        self.ledger = RequestLedger(self.path, limit=2)
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ProviderError, "ledger_closed"):
+            client.complete([{"role": "user", "content": "Must not send."}])
+        self.assertEqual(sent, [])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.ledger.started, 0)
+
+    def test_finish_requires_one_pending_integer_request_and_does_not_double_count(self):
+        number = self.ledger.reserve(run_id="synthetic", case_id="one")
+        self.assertEqual(self.ledger.summary()["unknown_usage_attempts"], 1)
+        before = self.path.read_bytes()
+        for invalid in (True, 0, 2, [], None):
+            with self.subTest(number=invalid), self.assertRaisesRegex(ProviderError, "ledger_finish_invalid"):
+                self.ledger.finish(invalid, status="success", usage=None, seconds=0)
+        with self.assertRaisesRegex(ProviderError, "unfinished_request"):
+            self.ledger.reserve(run_id="synthetic", case_id="two")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.ledger.finish(number, status="success", usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}, seconds=0)
+        with self.assertRaisesRegex(ProviderError, "ledger_finish_invalid"):
+            self.ledger.finish(number, status="success", usage=None, seconds=0)
+        self.assertEqual(self.ledger.summary()["unknown_usage_attempts"], 0)
+        self.assertEqual(self.ledger.usage["total_tokens"], 3)
+
+    def test_reservation_write_failure_stops_before_send_and_preserves_uncertain_record(self):
+        sent = []
+        client = self.client(lambda *_: sent.append(True) or reply())
+        self.addCleanup(client.close)
+        with patch("vulngym_t2.llm.os.fsync", side_effect=OSError("private disk detail")):
+            with self.assertRaisesRegex(ProviderError, "ledger_write_failed_preserve_and_inspect"):
+                client.complete([{"role": "user", "content": "Must not send."}])
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ProviderError, "ledger_write_failed_preserve_and_inspect"):
+            client.complete([{"role": "user", "content": "Still must not send."}])
+        self.assertEqual(sent, [])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertNotIn("private disk", before.decode())
+        self.ledger.close()
+        with self.assertRaisesRegex(ValueError, "unfinished_request"):
+            RequestLedger(self.path, limit=2)
+
+    def test_finish_write_failure_halts_after_one_attempt_without_claiming_success(self):
+        sent = []
+        client = self.client(lambda *_: sent.append(True) or reply())
+        self.addCleanup(client.close)
+        with patch("vulngym_t2.llm.os.fsync", side_effect=[None, OSError("private disk detail")]):
+            with self.assertRaisesRegex(ProviderError, "ledger_write_failed_preserve_and_inspect"):
+                client.complete([{"role": "user", "content": "Synthetic."}])
+        with self.assertRaisesRegex(ProviderError, "ledger_write_failed_preserve_and_inspect"):
+            client.complete([{"role": "user", "content": "Must not send again."}])
+        self.assertEqual((len(sent), client.calls), (1, 1))
+        self.assertEqual(client.events, [])
+        self.assertEqual(self.ledger.summary()["unknown_usage_attempts"], 1)
+
+    def test_keyboard_interrupt_preserves_unfinished_attempt_and_unknown_usage(self):
+        sent = []
+        def interrupted(*_):
+            sent.append(True)
+            raise KeyboardInterrupt
+        client = self.client(interrupted)
+        self.addCleanup(client.close)
+        with self.assertRaises(KeyboardInterrupt):
+            client.complete([{"role": "user", "content": "Synthetic."}])
+        self.assertEqual((client.calls, self.ledger.started), (1, 1))
+        self.assertEqual(client.events[0]["failure_kind"], "interrupted")
+        self.assertEqual(client.events[0]["status"], "error")
+        self.assertIsNone(client.events[0]["usage"])
+        self.assertEqual(self.ledger.summary()["unknown_usage_attempts"], 1)
+        self.assertEqual([json.loads(line)["event"] for line in self.path.read_text().splitlines()],
+                         ["authorization", "http_started"])
+        with self.assertRaisesRegex(ProviderError, "provider_request_interrupted"):
+            client.complete([{"role": "user", "content": "Must not retry."}])
+        self.assertEqual(sent, [True])
+        self.ledger.close()
+        with self.assertRaisesRegex(ValueError, "unfinished_request"):
+            RequestLedger(self.path, limit=2)
+
+    def test_invalid_provider_settings_are_rejected_before_reservation(self):
+        for settings in ({"timeout": None}, {"timeout": True}, {"timeout": "5"},
+                         {"timeout": float("nan")}, {"timeout": float("inf")}, {"timeout": 10 ** 1000},
+                         {"reasoning_effort": []}):
+            with self.subTest(settings=settings), self.assertRaisesRegex(ValueError, "provider_settings_invalid"):
+                DeepSeekClient("synthetic-key", self.ledger, run_id="synthetic", **settings)
+        with self.assertRaisesRegex(ValueError, "api_key_missing_or_invalid"):
+            DeepSeekClient("x" * 4097, self.ledger, run_id="synthetic")
+        self.assertEqual(self.ledger.started, 0)
+
+    def test_interrupt_during_completion_persistence_is_not_a_success_or_retry(self):
+        sent = []
+        client = self.client(lambda *_: sent.append(True) or reply())
+        self.addCleanup(client.close)
+        with patch("vulngym_t2.llm.os.fsync", side_effect=[None, KeyboardInterrupt]):
+            with self.assertRaises(KeyboardInterrupt):
+                client.complete([{"role": "user", "content": "Synthetic."}])
+        self.assertEqual((client.calls, self.ledger.started), (1, 1))
+        self.assertEqual(client.events[0]["failure_kind"], "interrupted")
+        self.assertIsNone(client.events[0]["usage"])
+        self.assertEqual(self.ledger.summary()["unknown_usage_attempts"], 1)
+        with self.assertRaisesRegex(ProviderError, "provider_request_interrupted"):
+            client.complete([{"role": "user", "content": "Must not retry."}])
+        self.assertEqual(sent, [True])
+
+    def test_malformed_existing_rows_are_rejected_and_release_the_writer_lock(self):
+        header = self.path.read_text().splitlines()[0]
+        self.ledger.close()
+        for rows, code in (([None], "ledger_event_invalid"), ([[]], "ledger_event_invalid"),
+                ([{"event": "http_started", "request": 1}, {"event": "http_finished", "request": True}], "ledger_finish_invalid")):
+            text = "\n".join([header, *(json.dumps(row) for row in rows)])
+            with self.subTest(code=code), patch.object(Path, "read_text", return_value=text):
+                with self.assertRaisesRegex(ValueError, code):
+                    RequestLedger(self.path, limit=2)
+        with patch.object(Path, "read_text", return_value=header + '\n{"event":"http_started","event":"http_finished"}'):
+            with self.assertRaisesRegex(ValueError, "ledger_invalid_json"):
+                RequestLedger(self.path, limit=2)
+        # Every failed constructor must release its lock; original bytes stay intact.
+        self.ledger = RequestLedger(self.path, limit=2)
+        self.assertEqual(self.ledger.started, 0)
 
 
 if __name__ == "__main__":

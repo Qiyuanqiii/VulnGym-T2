@@ -61,28 +61,125 @@ class _TransportBlocked(TransportError):
         self.diagnostic = diagnostic
 
 
-class _CompletionBlocked(TransportError):
+class _FormatBlocked(_TransportBlocked):
+    """Typed format failure, independent of permission to continue another input."""
+
+    __slots__ = ()
+
+
+class _CompletionBlocked(_FormatBlocked):
     """Completion counters only; never retain answer or hidden reasoning text."""
 
-    __slots__ = ("diagnostic",)
+    __slots__ = ()
 
     def __init__(self, diagnostic: dict[str, Any]) -> None:
-        super().__init__("deepseek_output_truncated")
-        self.diagnostic = diagnostic
+        super().__init__("deepseek_output_truncated", diagnostic)
 
 
-class _JSONBlocked(TransportError):
+class _JSONBlocked(_FormatBlocked):
     """Only structural parser metadata; never retain the offending document."""
 
-    __slots__ = ("diagnostic",)
+    __slots__ = ()
 
     def __init__(self, code: str, diagnostic: dict[str, Any]) -> None:
-        super().__init__(code)
-        self.diagnostic = diagnostic
+        super().__init__(code, diagnostic)
 
 
 class _CompletionJSONBlocked(_JSONBlocked):
     """Format failure only after validating the completed provider envelope."""
+
+
+_JSON_FAILURE_KINDS = frozenset({
+    "duplicate_key", "non_finite_json", "json_structure_limit", "json_string_limit",
+    "json_key_limit", "json_text_limit", "unsupported_json_type", "json_bytes_limit", "object_required",
+})
+_DUPLICATE_KEY_NAMES = frozenset({
+    "commit", "vuln_title", "vuln_category_l1", "vuln_category_l2", "entry_point",
+    "critical_operation", "trace", "vuln_ids", "value", "status", "reason", "evidence_refs",
+    "revision_basis", "evidence_ref", "source_id", "start_line", "end_line", "desc", "candidates", "scope",
+    "tool", "arguments", "calls", "records", "name", "path", "query", "paths", "before", "after",
+})
+
+
+class _DuplicateKey(ValueError):
+    """Retain a known schema name only, never the repeated values or unknown key."""
+
+    def __init__(self, key):
+        super().__init__("duplicate_key")
+        self.known_key = key if key in _DUPLICATE_KEY_NAMES else "unknown"
+
+
+def public_failure_diagnostics(value: Any) -> dict[str, Any]:
+    """Expose the failing parse layer without response text or arbitrary labels.
+
+    Reports must not need the private request ledger to distinguish malformed
+    function arguments from a network failure. Only fixed parser metadata is
+    transferable; applying this filter repeatedly is harmless.
+    """
+    if not isinstance(value, dict):
+        return {}
+    enums = {
+        "phase": {"parse_completion_json", "parse_completion", "validate_staged_step", "validate_submit_step"},
+        "json_error_kind": {"JSONDecodeError", "UnicodeDecodeError", "ValueError", "RecursionError"} | _JSON_FAILURE_KINDS,
+        "duplicate_key_name": _DUPLICATE_KEY_NAMES | {"unknown"},
+        "json_decode_message": {"Expecting ',' delimiter", "Expecting ':' delimiter", "Expecting value",
+                                "Expecting property name enclosed in double quotes", "Extra data",
+                                "Unterminated string starting at", "Invalid control character at",
+                                "Invalid \\escape", "Invalid \\uXXXX escape"},
+        "finish_reason": {"stop", "length", "tool_calls", "content_filter", "insufficient_system_resource", "other"},
+        "protocol_stage": {"read", "candidate_selection", "annotation", "followup", "assessment"},
+        "tail_kind": {"single_object_close", "other"},
+    }
+    result = {key: value[key] for key, allowed in enums.items()
+              if isinstance(value.get(key), str) and value[key] in allowed}
+    for key in ("json_decode_line", "json_decode_column", "answer_characters", "response_bytes", "tail_length"):
+        if type(value.get(key)) is int and 0 <= value[key] <= MAX_RESPONSE_BYTES:
+            result[key] = value[key]
+    for key in ("format_error_isolatable", "refusal_present", "model_matches"):
+        if type(value.get(key)) is bool:
+            result[key] = value[key]
+    # The ledger already filters these counts and fixed names. Preserve the
+    # same bounded metadata in public model_failure actions so a reviewer can
+    # distinguish a malformed/unknown name without opening the request ledger.
+    # Unknown names, argument values and response text remain excluded.
+    result.update(_safe_tool_diagnostics(value))
+    return result
+
+
+_DIAGNOSTIC_TOOL_NAMES = frozenset({
+    "inspect_commit", "list_refs", "search_history", "list_files", "read_file",
+    "search_code", "read_diff", "submit_step", "submit_annotation", "submit_annotations", "propose_candidates", "finish_reading", "submit_read_plan",
+})
+
+
+def _tool_call_diagnostics(message: dict[str, Any]) -> dict[str, Any]:
+    """Only counts and fixed known names; never retain unknown names or arguments."""
+    calls = message.get("tool_calls")
+    if not isinstance(calls, list):
+        return {"tool_call_count": None, "tool_names": [], "unknown_tool_count": None}
+    known, unknown = set(), 0
+    for call in calls:
+        function = call.get("function") if isinstance(call, dict) else None
+        name = function.get("name") if isinstance(function, dict) else None
+        if isinstance(name, str) and name in _DIAGNOSTIC_TOOL_NAMES:
+            known.add(name)
+        else:
+            unknown += 1
+    return {"tool_call_count": len(calls), "tool_names": sorted(known), "unknown_tool_count": unknown}
+
+
+def _safe_tool_diagnostics(values: dict[str, Any]) -> dict[str, Any]:
+    """Recheck these three fields at the error/log boundary, without generic lists."""
+    result = {}
+    for name in ("tool_call_count", "unknown_tool_count"):
+        value = values.get(name)
+        if name in values and (value is None or type(value) is int and 0 <= value <= 1_048_576):
+            result[name] = value
+    names = values.get("tool_names")
+    if (isinstance(names, list) and len(names) <= len(_DIAGNOSTIC_TOOL_NAMES)
+            and all(isinstance(name, str) and name in _DIAGNOSTIC_TOOL_NAMES for name in names)):
+        result["tool_names"] = sorted(set(names))
+    return result
 
 
 def _json_shape(text: str | None) -> dict[str, Any]:
@@ -105,10 +202,10 @@ def _json_failure(code: str, text: str | None, error: Exception | None = None) -
         # or error.doc; neither the source document nor its snippets are retained.
         diagnostic.update(json_decode_message=error.msg[:160],
                           json_decode_line=error.lineno, json_decode_column=error.colno)
-    elif isinstance(error, ValueError) and str(error) in {
-            "duplicate_key", "non_finite_json", "json_structure_limit", "json_string_limit",
-            "json_key_limit", "json_text_limit", "unsupported_json_type", "json_bytes_limit"}:
+    elif isinstance(error, ValueError) and str(error) in _JSON_FAILURE_KINDS:
         diagnostic["json_error_kind"] = str(error)
+    if isinstance(error, _DuplicateKey):
+        diagnostic["duplicate_key_name"] = error.known_key
     return _JSONBlocked(code, diagnostic)
 
 
@@ -241,9 +338,11 @@ def _post_official(body: bytes, api_key: str, timeout: float, *, api_path: str =
                       else "deepseek_transport_error") from None
     finally:
         timer.cancel()
-        if response is not None:
-            response.close()
-        connection.close()
+        try:
+            if response is not None:
+                response.close()
+        finally:
+            connection.close()
 
 
 def _post_official_strict(body: bytes, api_key: str, timeout: float) -> bytes:
@@ -254,7 +353,7 @@ def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError("duplicate_key")
+            raise _DuplicateKey(key)
         result[key] = value
     return result
 
@@ -270,16 +369,22 @@ def _finite_float(value: str) -> float:
     return number
 
 
-def _strict_object(raw: bytes) -> dict[str, Any]:
+def _strict_object(raw: bytes, *, normalization_audit: list | None = None) -> dict[str, Any]:
     if not isinstance(raw, bytes) or len(raw) > MAX_RESPONSE_BYTES:
         raise TransportError("deepseek_response_too_large")
     text = None
     try:
         text = raw.decode("utf-8")
-        value = json.loads(text, object_pairs_hook=_pairs,
-                           parse_constant=_constant, parse_float=_finite_float)
+        from .completion_json import parse_completion_json
+        decoder = json.JSONDecoder(object_pairs_hook=_pairs, parse_constant=_constant, parse_float=_finite_float)
+        value, audit = parse_completion_json(text, decoder=decoder, allowed=normalization_audit is not None)
+        if audit and normalization_audit is not None:
+            normalization_audit.append(audit)
     except (ValueError, UnicodeError, RecursionError) as error:
-        raise _json_failure("deepseek_response_invalid_json", text, error) from None
+        from .completion_json import extra_data_diagnostics
+        failure = _json_failure("deepseek_response_invalid_json", text, error)
+        failure.diagnostic.update(extra_data_diagnostics(text, error))
+        raise failure from None
     if not isinstance(value, dict):
         raise _json_failure("deepseek_response_not_object", text) from None
     return value
@@ -327,6 +432,120 @@ def _validate_bounded_json(value: dict[str, Any]) -> None:
         raise ValueError("json_bytes_limit")
 
 
+def _bounded_syntax_encoding_failure(content: str, diagnostic: dict[str, Any]) -> bool:
+    """Classify bounded syntax only, never repair or extract rejected values.
+
+    Called only after the native envelope, function, stage and refusal checks.
+    No source read or annotation value is produced here. Non-syntax and
+    resource failures stop, regardless of the selected encoding protocol.
+    """
+    if (diagnostic.get("json_error_kind") != "JSONDecodeError"
+            or not isinstance(content, str) or not 1 <= len(content) <= _MAX_STRING_CHARS
+            or not content.lstrip().startswith("{")
+            or len(content.encode("utf-8")) > _MAX_CANONICAL_BYTES):
+        return False
+    # A malformed prefix cannot pass normal JSON resource validation. Apply
+    # conservative lexical bounds without extracting any keys or values.
+    depth = separators = 0
+    quoted = escaped = False
+    for char in content:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "{[":
+            depth += 1
+            if depth > _MAX_JSON_DEPTH:
+                return False
+        elif char in "}]":
+            depth -= 1
+            if depth < 0:
+                return False
+        elif char in ",:":
+            separators += 1
+            if separators >= _MAX_JSON_NODES:
+                return False
+    return True
+
+
+def _syntax_annotation_rejection(content: str, diagnostic: dict[str, Any]) -> dict[str, Any] | None:
+    if not _bounded_syntax_encoding_failure(content, diagnostic):
+        return None
+    return {"action": "annotation_snapshot_rejected", "code": "invalid_annotation_json",
+            "path": "$[0].arguments", "answer_characters": len(content)}
+
+
+def _duplicate_annotation_rejection(content: str) -> dict[str, Any] | None:
+    """Recognize a rejected snapshot without resolving any duplicate value.
+
+    Strict parsing has already failed. A lossless object-pairs tree is used
+    only to locate duplicate location properties or decision evidence_refs.
+    Nothing from this tree becomes a field, suggestion, or model feedback.
+    Other malformed shapes and resource violations remain hard failures.
+    """
+    from .staged_protocol import ANNOTATION_FIELDS
+
+    class ObjectPairs(list):
+        """Distinct from a JSON array; retain *every* occurrence of each key."""
+
+    def pairs(items):
+        if any(len(key) > 64 for key, _ in items):
+            raise ValueError("json_key_limit")
+        return ObjectPairs([list(pair) for pair in items])
+
+    fields, keys, duplicate_count = set(), set(), 0
+
+    def visit(item, path=()):
+        nonlocal duplicate_count
+        if isinstance(item, ObjectPairs):
+            location = (len(path) == 2 and path[0] in ("entry_point", "critical_operation")
+                        and path[1] == "value") or (
+                            len(path) == 3 and path[:2] == ("trace", "value")
+                            and type(path[2]) is int and 0 <= path[2] < 32)
+            seen = set()
+            for key, child in item:
+                if key in seen:
+                    decision_refs = (len(path) == 1 and path[0] in ANNOTATION_FIELDS
+                                     and key == "evidence_refs")
+                    location_key = location and key in {"source_id", "start_line", "end_line", "desc"}
+                    if not (location_key or decision_refs):
+                        raise ValueError("duplicate_outside_annotation_allowlist")
+                    fields.add(path[0])
+                    keys.add(key)
+                    duplicate_count += 1
+                seen.add(key)
+                visit(child, (*path, key))
+        elif isinstance(item, list):
+            for index, child in enumerate(item):
+                visit(child, (*path, index))
+
+    try:
+        if len(content.encode("utf-8")) > MAX_RESPONSE_BYTES:
+            return None
+        tree = json.loads(content, object_pairs_hook=pairs, parse_constant=_constant, parse_float=_finite_float)
+        # Pair arrays conservatively consume the same node/depth/text budget;
+        # this path never grants a larger JSON domain than ordinary parsing.
+        _validate_bounded_json(tree)
+        protocol._bounded([{"tool": "submit_annotation", "arguments": tree}], allow_json_scalars=True)
+        if (not isinstance(tree, ObjectPairs) or len(tree) != len(ANNOTATION_FIELDS)
+                or {key for key, _ in tree} != set(ANNOTATION_FIELDS)):
+            return None
+        visit(tree)
+    except (ValueError, UnicodeError, RecursionError):
+        return None
+    if not 1 <= duplicate_count <= 128:
+        return None
+    code = "duplicate_reference_key" if "evidence_refs" in keys else "duplicate_location_key"
+    return {"action": "annotation_snapshot_rejected", "code": code,
+            "path": "$[0].arguments", "duplicate_fields": sorted(fields),
+            "known_duplicate_keys": sorted(keys), "duplicate_key_count": duplicate_count}
+
+
 def _truncation_metadata(envelope: dict[str, Any], choice: dict[str, Any], size: int) -> dict[str, Any]:
     message = choice.get("message")
     message = message if isinstance(message, dict) else {}
@@ -350,10 +569,21 @@ def _truncation_metadata(envelope: dict[str, Any], choice: dict[str, Any], size:
 
 
 def parse_chat_response(raw: bytes, *, expected_model: str = MODEL_ID,
-                        response_mode: str = "json") -> dict[str, Any]:
+                        response_mode: str = "json", stage: str | None = None,
+                        location_key: str = "evidence_ref", read_format: str = "native_tool") -> dict[str, Any]:
     expected_model = validate_model_id(expected_model)
-    if not isinstance(response_mode, str) or response_mode not in {"json", "strict_tool"}:
+    if not isinstance(response_mode, str) or response_mode not in {"json", "strict_tool", "staged_tool", "assessment_text"}:
         raise ValueError("provider_response_mode_invalid")
+    if read_format not in ("native_tool", "plan_tool"):
+        raise ValueError("provider_read_format_invalid")
+    if read_format == "plan_tool" and (response_mode != "staged_tool" or stage not in ("read", "followup")):
+        raise ValueError("read_plan_stage_invalid")
+    if response_mode == "staged_tool":
+        from . import staged_protocol
+        allowed_names = {item["function"]["name"] for item in staged_protocol.tool_definitions(
+            stage, location_key=location_key, read_format=read_format)}
+    elif location_key != "evidence_ref":
+        raise ValueError("location_reference_key_invalid")
     envelope = _strict_object(raw)
     if envelope.get("object") != "chat.completion":
         raise TransportError("deepseek_response_invalid")
@@ -366,10 +596,12 @@ def parse_chat_response(raw: bytes, *, expected_model: str = MODEL_ID,
     if type(choice.get("index")) is not int or choice["index"] != 0:
         raise TransportError("deepseek_response_invalid")
     finish = choice.get("finish_reason")
-    expected_finish = "tool_calls" if response_mode == "strict_tool" else "stop"
+    expected_finish = "tool_calls" if response_mode in {"strict_tool", "staged_tool"} else "stop"
     if finish != expected_finish:
         if finish == "length":
             raise _CompletionBlocked(_truncation_metadata(envelope, choice, len(raw)))
+        if finish == "stop" and response_mode in {"strict_tool", "staged_tool"}:
+            raise _FormatBlocked("deepseek_completion_incomplete", {"phase": "parse_completion"})
         raise TransportError({"content_filter": "deepseek_content_filtered",
                               "insufficient_system_resource": "deepseek_resource_unavailable"}.get(
                                   finish if isinstance(finish, str) else "", "deepseek_completion_incomplete"))
@@ -378,42 +610,98 @@ def parse_chat_response(raw: bytes, *, expected_model: str = MODEL_ID,
         raise TransportError("deepseek_response_invalid")
     if message.get("refusal"):
         raise TransportError("deepseek_refusal")
-    if response_mode == "strict_tool":
+    if response_mode in {"strict_tool", "staged_tool"}:
         calls = message.get("tool_calls")
-        if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], dict):
-            raise TransportError("deepseek_strict_tool_call_invalid")
-        call = calls[0]
-        function = call.get("function")
-        if (call.get("type") != "function" or not isinstance(function, dict)
-                or function.get("name") != protocol.STRICT_TOOL_NAME
-                or set(function) != {"name", "arguments"}
-                or not isinstance(call.get("id"), str) or not 1 <= len(call["id"]) <= 256):
-            raise TransportError("deepseek_strict_tool_call_invalid")
+        call_diagnostics = _tool_call_diagnostics(message)
+        call_limit = (staged_protocol.MAX_READ_CALLS if response_mode == "staged_tool"
+                      and stage == "read" and read_format == "native_tool" else 1)
+        if not isinstance(calls, list) or not 1 <= len(calls) <= call_limit:
+            raise _FormatBlocked("deepseek_strict_tool_call_invalid", call_diagnostics)
         content = message.get("content")
         if content is not None and not isinstance(content, str):
-            raise TransportError("deepseek_strict_tool_call_invalid")
-        # Native tool messages may also contain prose. Only the sole typed
-        # container is authoritative; ancillary content is never returned.
-        arguments = function.get("arguments")
-        if not isinstance(arguments, str) or not arguments.strip():
-            raise TransportError("deepseek_strict_tool_arguments_invalid")
-        value = _parse_completion_json(arguments, unwrap_fence=False)
+            raise _FormatBlocked("deepseek_strict_tool_call_invalid", call_diagnostics)
+        # Validate every envelope and parse every argument object before returning
+        # a batch. A bad later call can never cause an earlier read to execute.
+        parsed_calls = []
+        completion_normalizations = []
+        for call in calls:
+            function = call.get("function") if isinstance(call, dict) else None
+            if (not isinstance(call, dict) or call.get("type") != "function" or not isinstance(function, dict)
+                    or not isinstance(function.get("name"), str)
+                    or function.get("name") not in (allowed_names if response_mode == "staged_tool" else {protocol.STRICT_TOOL_NAME})
+                    or set(function) != {"name", "arguments"}
+                    or not isinstance(call.get("id"), str) or not 1 <= len(call["id"]) <= 256):
+                raise _FormatBlocked("deepseek_strict_tool_call_invalid", call_diagnostics)
+            arguments = function.get("arguments")
+            if not isinstance(arguments, str) or not arguments.strip():
+                raise _FormatBlocked("deepseek_strict_tool_arguments_invalid", call_diagnostics)
+            # Only tools-closed annotation/selection may tolerate one redundant
+            # object close or trailing separator. Read arguments and provider
+            # envelopes remain strict. Values still face the full same schema.
+            audit = completion_normalizations if (response_mode == "staged_tool" and
+                function["name"] in {"submit_annotation", "propose_candidates"}) else None
+            try:
+                parsed = _parse_completion_json(arguments, unwrap_fence=False, normalization_audit=audit)
+            except _CompletionJSONBlocked as error:
+                # The tools-closed assessed encoder may reject its whole answer
+                # for one same-assessment correction. No failed text is repaired
+                # or reused; reads, refusals and outer failures cannot enter it.
+                if (response_mode == "staged_tool" and stage == "annotation" and location_key == "source_id"
+                        and len(calls) == 1 and function["name"] == "submit_annotation"):
+                    if error.diagnostic.get("json_error_kind") == "duplicate_key":
+                        rejection = _duplicate_annotation_rejection(arguments)
+                    else:
+                        rejection = _syntax_annotation_rejection(arguments, error.diagnostic)
+                    if rejection:
+                        return rejection
+                if (read_format == "plan_tool" and len(calls) == 1
+                        and _bounded_syntax_encoding_failure(arguments, error.diagnostic)):
+                    # The single named read-plan envelope has already passed
+                    # every provider/stage/function check. Reject it in full:
+                    # no argument decoding, local repair or partial execution.
+                    return {"action": "read_plan_rejected", "code": "invalid_plan_json",
+                            "path": "$[0].arguments", "answer_characters": len(arguments)}
+                raise
+            parsed_calls.append({"tool": function["name"], "arguments": parsed})
+        if response_mode == "staged_tool":
+            try:
+                if read_format == "plan_tool":
+                    from .read_plan_protocol import normalize
+                    return normalize(parsed_calls[0]["arguments"], stage)
+                result = staged_protocol.normalize_calls(parsed_calls, stage, location_key=location_key)
+                if completion_normalizations:
+                    from .completion_json import public_normalizations
+                    result["completion_json_normalizations"] = public_normalizations(completion_normalizations)
+                return result
+            except staged_protocol.ProtocolError as error:
+                raise _FormatBlocked(error.error_code, dict(error.diagnostic)) from None
         try:
-            return protocol.normalize_step(value)
-        except protocol.ProtocolError:
-            raise TransportError("deepseek_strict_protocol_invalid") from None
+            return protocol.normalize_step(parsed_calls[0]["arguments"])
+        except protocol.ProtocolError as error:
+            # Fixed reason codes and schema-only paths, never response values.
+            # Remains a global stop, not a resumable JSON syntax failure.
+            raise _FormatBlocked("deepseek_strict_protocol_invalid", dict(error.diagnostic)) from None
     if message.get("tool_calls"):
         raise TransportError("deepseek_response_invalid")
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
         raise TransportError("deepseek_empty_content")
+    if response_mode == "assessment_text":
+        from .annotation_rules import ASSESSMENT_MAX_CHARS
+        if len(content) > ASSESSMENT_MAX_CHARS:
+            raise _FormatBlocked("deepseek_assessment_limit", {
+                "phase": "parse_completion", "answer_characters": len(content)})
+        # Only the public answer is retained, never reasoning_content. This is
+        # not parsed as a draft, accepted as evidence, or used to execute tools.
+        return {"action": "assessment", "text": content}
     return _parse_completion_json(content, unwrap_fence=True)
 
 
-def _parse_completion_json(content: str, *, unwrap_fence: bool) -> dict[str, Any]:
+def _parse_completion_json(content: str, *, unwrap_fence: bool,
+                           normalization_audit: list | None = None) -> dict[str, Any]:
     json_content, unwrapped = _unwrap_json_fence(content) if unwrap_fence else (content, False)
     try:
-        result = _strict_object(json_content.encode("utf-8"))
+        result = _strict_object(json_content.encode("utf-8"), normalization_audit=normalization_audit)
         _validate_bounded_json(result)
     except _JSONBlocked as error:
         diagnostic = dict(error.diagnostic, phase="parse_completion_json",
